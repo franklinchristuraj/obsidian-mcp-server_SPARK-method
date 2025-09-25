@@ -1,0 +1,22 @@
+# Obsidian MCP Server Development Rules
+
+## Code Style
+- Use async/await for all I/O operations
+- Follow PEP 8 style guide
+- Use type hints for all functions
+- Keep functions focused and under 50 lines
+
+## MCP Protocol
+- All MCP responses must follow JSON-RPC 2.0 format
+- Include proper error handling with JSON-RPC error codes
+- Support SSE streaming for responses
+
+## Testing
+- Test all Obsidian API integrations
+- Verify authentication on protected endpoints
+- Test error cases and edge conditions
+
+## Security
+- Validate all user inputs
+- Prevent path traversal attacks
+- Use environment variables for secrets

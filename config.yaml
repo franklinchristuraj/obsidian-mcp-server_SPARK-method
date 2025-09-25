@@ -1,0 +1,22 @@
+server:
+  host: 0.0.0.0
+  port: 8888
+  base_path: /mcp
+  
+obsidian:
+  api_url: https://148.230.124.28:4443  # VERIFIED: Local REST API v3.2.0
+  vault_path: /root/obsidian/franklin-vault  # VERIFIED: SPARK methodology organization
+  api_key: 423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee  # VERIFIED: Working auth
+  
+security:
+  api_key_header: Authorization
+  require_auth: true
+  
+features:
+  enable_streaming: true
+  max_search_results: 50
+  cache_ttl: 300
+  
+logging:
+  level: DEBUG
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
