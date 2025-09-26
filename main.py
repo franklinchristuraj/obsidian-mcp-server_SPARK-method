@@ -98,27 +98,7 @@ def validate_jsonrpc_request(request_data: Dict[str, Any]) -> Optional[Dict[str,
     return None
 
 
-async def handle_jsonrpc_method(method: str, params: Optional[Any] = None) -> Any:
-    """Handle MCP method calls"""
-    # For now, implement a simple ping method
-    if method == "ping":
-        return {"message": "pong", "timestamp": "2025-09-22T00:00:00Z"}
-
-    # Add more MCP methods here as needed
-    elif method == "initialize":
-        return {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {},
-                "resources": {},
-                "prompts": {},
-                "logging": {},
-            },
-            "serverInfo": {"name": "obsidian-mcp-server", "version": "1.0.0"},
-        }
-
-    else:
-        raise ValueError(f"Method not found: {method}")
+# Removed: handle_jsonrpc_method function - using mcp_handler.handle_request instead
 
 
 async def create_sse_stream(
@@ -145,6 +125,16 @@ async def create_sse_stream(
     yield "data: [DONE]\n\n"
 
 
+@app.get("/mcp/debug")
+async def debug_endpoint():
+    return {
+        "status": "Server is running",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tools_count": len(mcp_handler.tools),
+        "server_info": mcp_handler.server_info,
+    }
+
+
 @app.post("/mcp")
 async def mcp_endpoint(request: Request, api_key: str = Depends(verify_api_key)):
     """
@@ -153,9 +143,14 @@ async def mcp_endpoint(request: Request, api_key: str = Depends(verify_api_key))
     Supports both single JSON responses and Server-Sent Events streaming
     """
     try:
-        # Parse request body
+        # Parse request body and log for debugging
+        body = await request.body()
+        print(
+            f"📥 MCP Request from {request.client.host if request.client else 'unknown'}"
+        )
+        print(f"📋 Headers: {dict(request.headers)}")
+        print(f"📄 Body: {body.decode()}")
         try:
-            body = await request.body()
             request_data = json.loads(body.decode())
         except json.JSONDecodeError:
             return JSONResponse(
