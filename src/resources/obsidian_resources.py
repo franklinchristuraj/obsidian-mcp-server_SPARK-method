@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from ..types import MCPResource
-from ..obsidian_client import ObsidianClient, ObsidianAPIError
+from ..clients.obsidian_client import ObsidianClient, ObsidianAPIError
 
 
 @dataclass
@@ -384,7 +384,7 @@ def get_obsidian_resources() -> ObsidianResources:
     global obsidian_resources
 
     if obsidian_resources is None:
-        from ..obsidian_client import ObsidianClient
+        from ..clients.obsidian_client import ObsidianClient
 
         client = ObsidianClient()
         obsidian_resources = ObsidianResources(client)

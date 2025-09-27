@@ -5,7 +5,7 @@ All 9 tools from the PRD specification using the enhanced ObsidianClient
 import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from src.obsidian_client import ObsidianClient, ObsidianAPIError
+from src.clients.obsidian_client import ObsidianClient, ObsidianAPIError
 from ..types import MCPTool
 
 
@@ -30,9 +30,9 @@ class ObsidianTools:
     def get_tools(self) -> List[MCPTool]:
         """Get all available MCP tools"""
         return [
-            # Tool 1: search_notes
+            # Tool 1: obs_search_notes
             MCPTool(
-                name="search_notes",
+                name="obs_search_notes",
                 description="Search notes in the Obsidian vault using full-text search",
                 inputSchema={
                     "type": "object",
@@ -51,9 +51,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 2: read_note
+            # Tool 2: obs_read_note
             MCPTool(
-                name="read_note",
+                name="obs_read_note",
                 description="Read the complete content of a specific note",
                 inputSchema={
                     "type": "object",
@@ -67,9 +67,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 3: create_note
+            # Tool 3: obs_create_note
             MCPTool(
-                name="create_note",
+                name="obs_create_note",
                 description="Create a new note in the Obsidian vault. Automatically applies templates based on folder location.",
                 inputSchema={
                     "type": "object",
@@ -97,9 +97,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 4: update_note
+            # Tool 4: obs_update_note
             MCPTool(
-                name="update_note",
+                name="obs_update_note",
                 description="Update the complete content of an existing note with format preservation",
                 inputSchema={
                     "type": "object",
@@ -122,9 +122,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 5: append_note
+            # Tool 5: obs_append_note
             MCPTool(
-                name="append_note",
+                name="obs_append_note",
                 description="Append content to an existing note",
                 inputSchema={
                     "type": "object",
@@ -147,9 +147,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 6: delete_note
+            # Tool 6: obs_delete_note
             MCPTool(
-                name="delete_note",
+                name="obs_delete_note",
                 description="Delete a note from the Obsidian vault",
                 inputSchema={
                     "type": "object",
@@ -163,9 +163,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 7: list_notes
+            # Tool 7: obs_list_notes
             MCPTool(
-                name="list_notes",
+                name="obs_list_notes",
                 description="List notes in the vault or a specific folder with metadata",
                 inputSchema={
                     "type": "object",
@@ -179,9 +179,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 8: get_vault_structure
+            # Tool 8: obs_get_vault_structure
             MCPTool(
-                name="get_vault_structure",
+                name="obs_get_vault_structure",
                 description="Get the complete folder and note structure of the vault",
                 inputSchema={
                     "type": "object",
@@ -195,9 +195,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 9: execute_command
+            # Tool 9: obs_execute_command
             MCPTool(
-                name="execute_command",
+                name="obs_execute_command",
                 description="Execute an Obsidian command via the REST API",
                 inputSchema={
                     "type": "object",
@@ -216,9 +216,9 @@ class ObsidianTools:
                     "additionalProperties": False,
                 },
             ),
-            # Tool 10: keyword_search - Simple keyword search
+            # Tool 10: obs_keyword_search - Simple keyword search
             MCPTool(
-                name="keyword_search",
+                name="obs_keyword_search",
                 description="Simple keyword search to find notes containing a specific word or phrase. More flexible than advanced search.",
                 inputSchema={
                     "type": "object",
@@ -877,16 +877,16 @@ class ObsidianTools:
         Execute a tool by name with given arguments
         """
         tool_methods = {
-            "search_notes": self.search_notes,
-            "read_note": self.read_note,
-            "create_note": self.create_note,
-            "update_note": self.update_note,
-            "append_note": self.append_note,
-            "delete_note": self.delete_note,
-            "list_notes": self.list_notes,
-            "get_vault_structure": self.get_vault_structure,
-            "execute_command": self.execute_command,
-            "keyword_search": self.keyword_search,
+            "obs_search_notes": self.search_notes,
+            "obs_read_note": self.read_note,
+            "obs_create_note": self.create_note,
+            "obs_update_note": self.update_note,
+            "obs_append_note": self.append_note,
+            "obs_delete_note": self.delete_note,
+            "obs_list_notes": self.list_notes,
+            "obs_get_vault_structure": self.get_vault_structure,
+            "obs_execute_command": self.execute_command,
+            "obs_keyword_search": self.keyword_search,
         }
 
         if tool_name not in tool_methods:

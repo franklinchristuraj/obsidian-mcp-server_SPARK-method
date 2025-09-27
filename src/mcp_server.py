@@ -18,7 +18,11 @@ class MCPProtocolHandler:
         self.session_id: Optional[str] = None
         self.session_initialized: bool = False
         self.protocol_version = "2024-11-05"
-        self.server_info = {"name": "obsidian-mcp-server", "version": "1.0.0"}
+        self.server_info = {
+            "name": "multi-app-mcp-server",
+            "version": "2.0.0",
+            "description": "Scalable MCP Server with Obsidian integration and extensible architecture for future applications",
+        }
         self.capabilities = MCPCapabilities(
             tools={"listChanged": True},
             resources={"subscribe": True, "listChanged": True},
@@ -46,6 +50,14 @@ class MCPProtocolHandler:
             self.tools.extend(obsidian_tools.get_tools())
         except Exception as e:
             print(f"Warning: Could not load Obsidian tools: {e}")
+
+        # Future application tools can be loaded here following the same pattern
+        # Example:
+        # try:
+        #     from .tools.notion_tools import notion_tools
+        #     self.tools.extend(notion_tools.get_tools())
+        # except Exception as e:
+        #     print(f"Warning: Could not load Notion tools: {e}")
 
         # Register available resources (loaded dynamically in Phase 4)
         self.resources: List[MCPResource] = []
@@ -152,11 +164,6 @@ class MCPProtocolHandler:
         if not tool_name:
             raise ValueError("Missing tool name")
 
-        # Find the tool
-        tool = next((t for t in self.tools if t.name == tool_name), None)
-        if not tool:
-            raise ValueError(f"Tool not found: {tool_name}")
-
         # Execute the tool
         if tool_name == "ping":
             return {
@@ -168,16 +175,41 @@ class MCPProtocolHandler:
                 ]
             }
 
-        # Execute Obsidian tools
-        try:
-            from .tools.obsidian_tools import obsidian_tools
+        # Route to appropriate service based on prefix
+        if tool_name.startswith("obs_"):
+            # Execute Obsidian tools
+            try:
+                from .tools.obsidian_tools import obsidian_tools
 
-            return await obsidian_tools.execute_tool(tool_name, arguments)
-        except Exception as e:
-            # If obsidian tool fails, provide a helpful error
+                return await obsidian_tools.execute_tool(tool_name, arguments)
+            except Exception as e:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"❌ Obsidian tool '{tool_name}' failed: {str(e)}",
+                        }
+                    ]
+                }
+        # Future application routing can be added here following the same pattern
+        # elif tool_name.startswith("notion_"):
+        #     try:
+        #         from .tools.notion_tools import notion_tools
+        #         return await notion_tools.execute_tool(tool_name, arguments)
+        #     except Exception as e:
+        #         return {
+        #             "content": [
+        #                 {"type": "text", "text": f"❌ Notion tool '{tool_name}' failed: {str(e)}"}
+        #             ]
+        #         }
+        else:
+            # Unknown tool prefix
             return {
                 "content": [
-                    {"type": "text", "text": f"❌ Tool '{tool_name}' failed: {str(e)}"}
+                    {
+                        "type": "text",
+                        "text": f"❌ Unknown tool prefix for '{tool_name}'. Expected 'obs_' prefix or other registered application prefixes.",
+                    }
                 ]
             }
 

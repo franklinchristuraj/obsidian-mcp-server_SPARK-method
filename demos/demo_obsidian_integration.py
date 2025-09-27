@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import datetime
 from dotenv import load_dotenv
-from src.obsidian_client import (
+from src.clients.obsidian_client import (
     ObsidianClient,
     ObsidianAPIError,
     NoteMetadata,
@@ -337,5 +337,3 @@ This demonstrates the enhanced ObsidianClient capabilities.
 
 if __name__ == "__main__":
     asyncio.run(demo_obsidian_integration())
-
-

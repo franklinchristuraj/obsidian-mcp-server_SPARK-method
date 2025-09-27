@@ -1,6 +1,6 @@
-# Obsidian MCP Server
+# Multi-Application MCP Server
 
-A complete Model Context Protocol (MCP) server that provides AI assistants with full access to Obsidian vault operations, including note management, template application, and format preservation.
+A complete Model Context Protocol (MCP) server that provides AI assistants with full access to **Obsidian** vault operations, built with a scalable architecture designed for easy integration of additional productivity applications.
 
 ## 🎯 Project Status: **PRODUCTION READY**
 
@@ -10,6 +10,7 @@ A complete Model Context Protocol (MCP) server that provides AI assistants with 
 - **Phase 3**: Complete MCP tools implementation (11 tools) ✅
 - **Phase 4**: Dynamic MCP resources and vault browsing ✅
 - **Phase 5**: Production deployment with template system ✅
+- **Phase 6**: Multi-application architecture with extensible design ✅
 
 ### 🚀 Live Production Server
 - **URL**: `https://mcp.ziksaka.com/mcp`
@@ -37,17 +38,28 @@ A complete Model Context Protocol (MCP) server that provides AI assistants with 
 ## 🌟 Key Features
 
 ### 🔧 MCP Tools (11 Total)
+
+#### 📝 Obsidian Tools (obs_ prefix)
+1. **obs_search_notes** - Advanced search with filters
+2. **obs_read_note** - Read note content and metadata
+3. **obs_create_note** - Create with automatic templates
+4. **obs_update_note** - Format-preserving updates
+5. **obs_append_note** - Add content safely
+6. **obs_delete_note** - Remove notes
+7. **obs_list_notes** - Browse vault notes
+8. **obs_get_vault_structure** - Explore organization
+9. **obs_execute_command** - Run Obsidian commands
+10. **obs_keyword_search** - Simple content search
+
+#### 🔧 System Tools
 1. **ping** - Connectivity testing
-2. **search_notes** - Advanced search with filters
-3. **read_note** - Read note content and metadata
-4. **create_note** - Create with automatic templates
-5. **update_note** - Format-preserving updates
-6. **append_note** - Add content safely
-7. **delete_note** - Remove notes
-8. **list_notes** - Browse vault notes
-9. **get_vault_structure** - Explore organization
-10. **execute_command** - Run Obsidian commands
-11. **keyword_search** - Simple content search
+
+#### 🚀 Extensible Architecture
+The server is designed with a scalable architecture that makes it easy to add new applications:
+- **Prefix-based routing** for clean tool organization
+- **Modular client structure** in `src/clients/`
+- **Consistent tool patterns** for rapid development
+- **Independent service initialization** for reliability
 
 ### 📚 MCP Resources
 - **Dynamic vault browsing** via `obsidian://notes/` URIs

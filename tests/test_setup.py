@@ -4,7 +4,7 @@ import asyncio
 import os
 import sys
 from dotenv import load_dotenv
-from src.obsidian_client import ObsidianClient
+from src.clients.obsidian_client import ObsidianClient
 
 
 async def verify_setup():

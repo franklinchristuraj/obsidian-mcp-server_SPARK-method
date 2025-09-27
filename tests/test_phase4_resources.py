@@ -284,7 +284,7 @@ class Phase4ResourceTester:
         # Test obsidian:// URI building and parsing
         try:
             from src.resources.obsidian_resources import ObsidianResources
-            from src.obsidian_client import ObsidianClient
+            from src.clients.obsidian_client import ObsidianClient
 
             client = ObsidianClient()
             resources = ObsidianResources(client)

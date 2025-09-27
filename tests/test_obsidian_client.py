@@ -8,7 +8,7 @@ import json
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from src.obsidian_client import ObsidianClient, ObsidianAPIError
+from src.clients.obsidian_client import ObsidianClient, ObsidianAPIError
 
 # Load environment variables
 load_dotenv()
@@ -296,5 +296,3 @@ This is a test note created by the Obsidian MCP Server.
 
 if __name__ == "__main__":
     asyncio.run(test_obsidian_client())
-
-
