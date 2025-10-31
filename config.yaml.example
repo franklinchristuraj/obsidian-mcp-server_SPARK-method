@@ -4,9 +4,9 @@ server:
   base_path: /mcp
   
 obsidian:
-  api_url: https://148.230.124.28:4443  # VERIFIED: Local REST API v3.2.0
-  vault_path: /root/obsidian/franklin-vault  # VERIFIED: SPARK methodology organization
-  api_key: 423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee  # VERIFIED: Working auth
+  api_url: http://localhost:27123  # Obsidian REST API URL
+  vault_path: /path/to/your/vault  # Path to Obsidian vault
+  api_key: YOUR_OBSIDIAN_API_KEY_HERE  # Set via environment variable or update here
   
 security:
   api_key_header: Authorization
@@ -20,3 +20,4 @@ features:
 logging:
   level: DEBUG
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+

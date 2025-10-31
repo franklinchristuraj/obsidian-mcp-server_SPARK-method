@@ -17,10 +17,14 @@ class MCPStdioBridge:
     """
 
     def __init__(self):
-        self.server_url = "https://mcp.ziksaka.com/mcp"
-        self.api_key = (
-            "REDACTED-LEAKED-KEY"
-        )
+        import os
+        self.server_url = os.getenv("MCP_SERVER_URL", "https://mcp.ziksaka.com/mcp")
+        self.api_key = os.getenv("MCP_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "MCP_API_KEY environment variable is required. "
+                "Set it with: export MCP_API_KEY='your-api-key'"
+            )
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",

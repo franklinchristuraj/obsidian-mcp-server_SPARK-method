@@ -6,7 +6,7 @@
 **Verified Configuration (September 23, 2025)**:
 - Service running on port 4443 at `http://148.230.124.28:4443`
 - Local REST API plugin v3.2.0 installed and configured
-- API key authentication working: `423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee`
+- API key authentication working: `YOUR_OBSIDIAN_API_KEY`
 - Vault path: `/root/obsidian/franklin-vault`
 - All CRUD operations (Create, Read, Update, Delete) verified
 - Vault structure accessible with SPARK methodology organization
@@ -33,7 +33,7 @@ Download and install Obsidian from https://obsidian.md/
 Create `.env` file in project root:
 ```bash
 OBSIDIAN_API_URL=http://148.230.124.28:4443
-OBSIDIAN_API_KEY=423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee
+OBSIDIAN_API_KEY=YOUR_OBSIDIAN_API_KEY_HERE
 OBSIDIAN_VAULT_PATH=/root/obsidian/franklin-vault
 ```
 
@@ -100,8 +100,8 @@ python -m http.server 4443 --bind 0.0.0.0
 curl http://148.230.124.28:4443/
 
 # Test with API key
-curl -H "Authorization: Bearer 423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee" http://148.230.124.28:4443/vault/
+curl -H "Authorization: Bearer YOUR_OBSIDIAN_API_KEY" http://148.230.124.28:4443/vault/
 
 # Test reading a specific note
-curl -H "Authorization: Bearer 423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee" "http://148.230.124.28:4443/vault/01_seeds/_README.md"
+curl -H "Authorization: Bearer YOUR_OBSIDIAN_API_KEY" "http://148.230.124.28:4443/vault/01_seeds/_README.md"
 ```

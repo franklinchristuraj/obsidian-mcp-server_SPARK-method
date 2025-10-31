@@ -37,6 +37,17 @@ server.log
 *.pid
 .env.production
 config_local.yaml
+config.yaml
+.env
+*.key
+*.pem
+*.crt
+
+# Sensitive documentation
+SETUP_STATUS.md
+REMOTE_ACCESS.md
+expose_obsidian_ports.sh
+recreate_obsidian_with_ports.sh
 
 # Backup files
 *.bak

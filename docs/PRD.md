@@ -170,7 +170,7 @@ MCP_API_KEY=your-secret-token-here
 
 # Obsidian REST API Configuration (VERIFIED)
 OBSIDIAN_API_URL=http://148.230.124.28:4443
-OBSIDIAN_API_KEY=423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee
+OBSIDIAN_API_KEY=YOUR_OBSIDIAN_API_KEY
 OBSIDIAN_VAULT_PATH=/root/obsidian/franklin-vault
 
 # Optional

@@ -28,7 +28,7 @@ MCP_API_KEY=generate-secure-32-char-key-here
 
 # Obsidian Configuration (Update paths as needed)
 OBSIDIAN_API_URL=http://127.0.0.1:4443
-OBSIDIAN_API_KEY=423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee
+OBSIDIAN_API_KEY=YOUR_OBSIDIAN_API_KEY
 OBSIDIAN_VAULT_PATH=/root/obsidian/franklin-vault
 
 # Production Settings

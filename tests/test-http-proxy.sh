@@ -3,7 +3,7 @@ echo "🧪 Testing HTTP proxy access (after DNS setup)..."
 echo "Testing: http://mcp.ziksaka.com/mcp"
 echo ""
 
-curl -H "Authorization: Bearer REDACTED-LEAKED-KEY" \
+curl -H "Authorization: Bearer ${MCP_API_KEY:-your-api-key}" \
      -H "Content-Type: application/json" \
      -X POST http://mcp.ziksaka.com/mcp \
      -d '{"jsonrpc":"2.0","method":"ping","id":1}' \

@@ -8,7 +8,7 @@
 | Parameter | Value | Status |
 |-----------|-------|--------|
 | **API URL** | `http://148.230.124.28:4443` | ✅ Accessible |
-| **API Key** | `423a772e...` (64 chars) | ✅ Valid |
+| **API Key** | `YOUR_OBSIDIAN_API_KEY` | ✅ Valid |
 | **Vault Path** | `/root/obsidian/franklin-vault` | ✅ Accessible |
 | **Plugin Version** | Local REST API v3.2.0 | ✅ Compatible |
 | **Authentication** | Bearer token | ✅ Working |
@@ -72,7 +72,7 @@ franklin-vault/
 curl http://148.230.124.28:4443/
 
 # Test authenticated access
-curl -H "Authorization: Bearer 423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee" \
+curl -H "Authorization: Bearer YOUR_OBSIDIAN_API_KEY" \
      http://148.230.124.28:4443/vault/
 
 # Run full test suite
@@ -84,7 +84,7 @@ python3 test_obsidian_client.py
 Add to `.env` file:
 ```bash
 OBSIDIAN_API_URL=http://148.230.124.28:4443
-OBSIDIAN_API_KEY=423a772ed267add25363e0f8bd9d15c71546598e07a69a9779cbde89b219deee
+OBSIDIAN_API_KEY=YOUR_OBSIDIAN_API_KEY
 OBSIDIAN_VAULT_PATH=/root/obsidian/franklin-vault
 ```
 
