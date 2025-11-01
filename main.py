@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import os
 import json
 import asyncio
+import time
+import hashlib
 from typing import Dict, Any, Optional, AsyncGenerator
 from src.auth import verify_api_key
 from src.mcp_server import mcp_handler, MCPProtocolHandler
@@ -28,12 +30,145 @@ async def health_check():
     return {"status": "healthy", "service": "obsidian-mcp-server"}
 
 
+@app.get("/authorize")
+async def oauth_authorize(
+    request: Request,
+    response_type: str = None,
+    client_id: str = None,
+    redirect_uri: str = None,
+    code_challenge: str = None,
+    code_challenge_method: str = None,
+    state: str = None,
+    scope: str = None,
+):
+    """
+    OAuth 2.0 Authorization endpoint for Claude.ai connectors
+    Implements simplified OAuth flow that returns authorization code
+    """
+    from urllib.parse import unquote
+    
+    # Decode URL-encoded client_id (Claude.ai sends "Obsidian+MCP+Server" URL-encoded)
+    if client_id:
+        client_id = unquote(client_id)
+    
+    expected_key = os.getenv("MCP_API_KEY")
+    
+    # Claude.ai sends the connector name as client_id, not the API key
+    # We'll accept any client_id and generate a code, then verify in token endpoint
+    # For simplified flow, accept any client_id and generate authorization code
+    if client_id:
+        # Generate authorization code
+        code_data = f"{client_id}:{time.time()}:{code_challenge or ''}"
+        auth_code = hashlib.sha256(code_data.encode()).hexdigest()[:32]
+        
+        # Store code temporarily (in production, use Redis or database)
+        # For now, accept any code in token endpoint if client_id matches
+        
+        # Redirect back to Claude.ai with authorization code
+        if redirect_uri:
+            redirect_url = f"{redirect_uri}?code={auth_code}&state={state or ''}"
+            return Response(status_code=302, headers={"Location": redirect_url})
+        else:
+            return {"code": auth_code, "state": state}
+    
+    # Return error if no client_id
+    return JSONResponse(
+        content={"error": "invalid_request", "error_description": "Missing client_id"},
+        status_code=400,
+    )
+
+
+@app.post("/token")
+async def oauth_token(
+    request: Request,
+    grant_type: str = None,
+    code: str = None,
+    redirect_uri: str = None,
+    client_id: str = None,
+    code_verifier: str = None,
+    scope: str = None,
+):
+    """
+    OAuth 2.0 Token endpoint for Claude.ai connectors
+    Exchanges authorization code for access token
+    """
+    from fastapi import Form
+    
+    # Parse form data if Content-Type is application/x-www-form-urlencoded
+    content_type = request.headers.get("content-type", "")
+    if "application/x-www-form-urlencoded" in content_type:
+        form_data = await request.form()
+        grant_type = form_data.get("grant_type") or grant_type
+        code = form_data.get("code") or code
+        redirect_uri = form_data.get("redirect_uri") or redirect_uri
+        client_id = form_data.get("client_id") or client_id
+        code_verifier = form_data.get("code_verifier") or code_verifier
+        scope = form_data.get("scope") or scope
+    
+    from urllib.parse import unquote
+    
+    # Decode URL-encoded client_id if needed
+    if client_id:
+        client_id = unquote(client_id)
+    
+    expected_key = os.getenv("MCP_API_KEY")
+    
+    # Simplified OAuth: If grant_type is authorization_code, return access token
+    if grant_type == "authorization_code":
+        # For simplified flow, accept any valid code and return API key as access token
+        # In production, verify code against stored codes
+        if code and client_id:
+            # Return access token (use API key as token)
+            # Claude.ai will use this as Bearer token for subsequent requests
+            access_token = expected_key
+            return {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "scope": scope or "claudeai",
+            }
+        else:
+            return JSONResponse(
+                content={"error": "invalid_request", "error_description": "Missing code or client_id"},
+                status_code=400,
+            )
+    
+    # Client credentials grant (for direct API access)
+    elif grant_type == "client_credentials":
+        # If client_id is the API key, return it as access token
+        if client_id == expected_key or (client_id and len(client_id) == 64):
+            access_token = expected_key
+            return {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+        # If client_id is connector name, use API key as token
+        elif client_id:
+            access_token = expected_key
+            return {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+    
+    return JSONResponse(
+        content={"error": "unsupported_grant_type", "error_description": f"Grant type {grant_type} not supported"},
+        status_code=400,
+    )
+
+
 @app.get("/")
 async def root():
     return {
         "name": "Obsidian MCP Server",
         "version": "1.0.0",
-        "endpoints": {"mcp": "/mcp", "health": "/health"},
+        "endpoints": {
+            "mcp": "/mcp",
+            "health": "/health",
+            "oauth_authorize": "/authorize",
+            "oauth_token": "/token",
+        },
     }
 
 
