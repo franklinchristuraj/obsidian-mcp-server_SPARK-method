@@ -3,6 +3,8 @@ Obsidian MCP Tools Implementation
 All 9 tools from the PRD specification using the enhanced ObsidianClient
 """
 import os
+import re
+import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from src.clients.obsidian_client import ObsidianClient, ObsidianAPIError
@@ -246,6 +248,42 @@ class ObsidianTools:
                         },
                     },
                     "required": ["keyword"],
+                    "additionalProperties": False,
+                },
+            ),
+            # Tool 11: obs_check_note_exists - Lightweight note existence check
+            MCPTool(
+                name="obs_check_note_exists",
+                description="Check if a note exists and optionally return its last modified date",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the note relative to vault root (e.g., 'Daily Notes/2024-01-15.md')",
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            ),
+            # Tool 12: obs_list_daily_notes - List daily notes in date range
+            MCPTool(
+                name="obs_list_daily_notes",
+                description="List daily notes between start and end dates, returning just filenames",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "startDate": {
+                            "type": "string",
+                            "description": "Start date in YYYY-MM-DD format",
+                        },
+                        "endDate": {
+                            "type": "string",
+                            "description": "End date in YYYY-MM-DD format",
+                        },
+                    },
+                    "required": ["startDate", "endDate"],
                     "additionalProperties": False,
                 },
             ),
@@ -751,13 +789,37 @@ class ObsidianTools:
 
         try:
             # Get all notes (with optional folder filtering)
-            all_notes = await self.client.list_notes(folder if folder else None)
+            # Don't include tags for better performance
+            all_notes = await self.client.list_notes(folder if folder else None, include_tags=False)
 
-            # Search for keyword in note content
+            # Handle empty vault case
+            if not all_notes:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"No notes found in {'folder ' + folder if folder else 'vault'}",
+                        }
+                    ],
+                    "metadata": {
+                        "keyword": keyword,
+                        "folder": folder,
+                        "case_sensitive": case_sensitive,
+                        "total_found": 0,
+                        "limit": limit,
+                        "matching_notes": [],
+                    },
+                }
+
+            # Search for keyword in note content using batched concurrent reads
             matching_notes = []
             search_keyword = keyword if case_sensitive else keyword.lower()
 
-            for note in all_notes:
+            # Process notes in batches for better performance
+            batch_size = 15  # Read 15 notes concurrently at a time
+
+            async def search_in_note(note):
+                """Search for keyword in a single note"""
                 try:
                     # Read note content
                     content = await self.client.read_note(note.path)
@@ -770,26 +832,42 @@ class ObsidianTools:
                             content, keyword, case_sensitive
                         )
 
-                        matching_notes.append(
-                            {
-                                "path": note.path,
-                                "name": note.name,
-                                "size": note.size,
-                                "modified": note.modified.isoformat(),
-                                "context": context,
-                                "folder": os.path.dirname(note.path)
-                                if os.path.dirname(note.path)
-                                else "root",
-                            }
-                        )
+                        return {
+                            "path": note.path,
+                            "name": note.name,
+                            "size": note.size,
+                            "modified": note.modified.isoformat(),
+                            "context": context,
+                            "folder": os.path.dirname(note.path)
+                            if os.path.dirname(note.path)
+                            else "root",
+                        }
+                except Exception:
+                    # Skip notes that can't be read
+                    pass
+                return None
 
-                        # Stop if we've reached the limit
+            # Process notes in batches until we reach the limit
+            for i in range(0, len(all_notes), batch_size):
+                # Stop if we've already found enough matches
+                if len(matching_notes) >= limit:
+                    break
+
+                # Get batch of notes
+                batch = all_notes[i:i + batch_size]
+
+                # Search in batch concurrently
+                results = await asyncio.gather(
+                    *[search_in_note(note) for note in batch],
+                    return_exceptions=True
+                )
+
+                # Collect non-None results
+                for result in results:
+                    if result and not isinstance(result, Exception):
+                        matching_notes.append(result)
                         if len(matching_notes) >= limit:
                             break
-
-                except Exception as e:
-                    # Skip notes that can't be read
-                    continue
 
             # Sort by relevance (more occurrences first) then by modification date
             matching_notes.sort(key=lambda x: x["modified"], reverse=True)
@@ -842,6 +920,105 @@ class ObsidianTools:
         except Exception as e:
             raise ValueError(f"Keyword search failed: {str(e)}")
 
+    async def check_note_exists(self, path: str) -> Dict[str, Any]:
+        """
+        Tool 11: Check if a note exists and return last modified date if available
+        """
+        if not self.client:
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+
+        try:
+            # Check if note exists using the client's note_exists method
+            exists = await self.client.note_exists(path)
+            
+            result = {"exists": exists}
+            
+            # If note exists, try to get last modified date
+            if exists:
+                try:
+                    metadata = await self.client.get_note_metadata(path)
+                    result["lastModified"] = metadata.modified.isoformat()
+                except Exception:
+                    # If we can't get metadata, that's okay - just return exists
+                    pass
+            
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Note '{path}' {'exists' if exists else 'does not exist'}"
+                        + (f" (last modified: {result.get('lastModified', 'unknown')})" if exists and result.get('lastModified') else ""),
+                    }
+                ],
+                "metadata": result,
+            }
+        except Exception as e:
+            raise ValueError(f"Failed to check note existence: {str(e)}")
+
+    async def list_daily_notes(
+        self, startDate: str, endDate: str
+    ) -> Dict[str, Any]:
+        """
+        Tool 12: List daily notes between start and end dates, returning just filenames
+        """
+        if not self.client:
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+
+        try:
+            # Parse dates
+            try:
+                start = datetime.strptime(startDate, "%Y-%m-%d")
+                end = datetime.strptime(endDate, "%Y-%m-%d")
+            except ValueError as e:
+                raise ValueError(f"Invalid date format. Expected YYYY-MM-DD: {str(e)}")
+            
+            if start > end:
+                raise ValueError("startDate must be before or equal to endDate")
+            
+            # Get all notes
+            all_notes = await self.client.list_notes()
+            
+            # Filter daily notes that match date pattern and are in range
+            daily_notes = []
+            date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})')
+            
+            for note in all_notes:
+                # Extract date from filename (common patterns: YYYY-MM-DD.md or Daily Notes/YYYY-MM-DD.md)
+                filename = note.name
+                date_match = date_pattern.search(filename)
+                
+                if date_match:
+                    note_date_str = date_match.group(1)
+                    try:
+                        note_date = datetime.strptime(note_date_str, "%Y-%m-%d")
+                        # Check if date is in range
+                        if start <= note_date <= end:
+                            # Return just the filename (not full path)
+                            daily_notes.append(filename)
+                    except ValueError:
+                        # Skip if date parsing fails
+                        continue
+            
+            # Sort by date
+            daily_notes.sort()
+            
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Found {len(daily_notes)} daily notes between {startDate} and {endDate}:\n\n"
+                        + "\n".join(f"- {note}" for note in daily_notes) if daily_notes else "No daily notes found in the specified date range.",
+                    }
+                ],
+                "metadata": {
+                    "startDate": startDate,
+                    "endDate": endDate,
+                    "notes": daily_notes,
+                },
+            }
+        except Exception as e:
+            raise ValueError(f"Failed to list daily notes: {str(e)}")
+
     def _extract_context(
         self, content: str, keyword: str, case_sensitive: bool = False
     ) -> str:
@@ -887,6 +1064,8 @@ class ObsidianTools:
             "obs_get_vault_structure": self.get_vault_structure,
             "obs_execute_command": self.execute_command,
             "obs_keyword_search": self.keyword_search,
+            "obs_check_note_exists": self.check_note_exists,
+            "obs_list_daily_notes": self.list_daily_notes,
         }
 
         if tool_name not in tool_methods:

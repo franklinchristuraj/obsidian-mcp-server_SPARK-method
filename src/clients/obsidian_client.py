@@ -7,6 +7,7 @@ import json
 import urllib.parse
 import os
 import glob
+import asyncio
 from typing import Optional, List, Dict, Any, Union
 from dataclasses import dataclass
 from datetime import datetime
@@ -87,13 +88,30 @@ class ObsidianClient:
         self._cache_timestamp: Optional[datetime] = None
         self._cache_ttl = 300  # 5 minutes
 
+        # Cache for filesystem scan (independent of vault structure)
+        self._filesystem_notes_cache: Optional[List[NoteMetadata]] = None
+        self._filesystem_cache_timestamp: Optional[datetime] = None
+        self._filesystem_cache_ttl = 180  # 3 minutes (shorter than vault structure)
+
     # =================== Basic Vault Operations ===================
 
-    def _discover_notes_filesystem(self) -> List[NoteMetadata]:
+    def _discover_notes_filesystem(self, include_tags: bool = False, use_cache: bool = True) -> List[NoteMetadata]:
         """
         Discover all notes in the vault using filesystem scanning
         This is a fallback when the REST API doesn't provide file listings
+
+        Args:
+            include_tags: Whether to read file content to extract tags (expensive!)
+            use_cache: Whether to use cached results if available
         """
+        # Check cache first
+        if use_cache and self._filesystem_notes_cache and self._filesystem_cache_timestamp:
+            cache_age = (datetime.now() - self._filesystem_cache_timestamp).total_seconds()
+            if cache_age < self._filesystem_cache_ttl:
+                # If cache has tags but we don't need them, or cache matches our needs, return it
+                if not include_tags or (self._filesystem_notes_cache and self._filesystem_notes_cache[0].tags is not None):
+                    return self._filesystem_notes_cache
+
         notes = []
         if not self.vault_path or not os.path.exists(self.vault_path):
             return notes
@@ -116,16 +134,17 @@ class ObsidianClient:
                     modified_time = datetime.fromtimestamp(stat.st_mtime)
                     created_time = datetime.fromtimestamp(stat.st_ctime)
 
-                    # Extract tags by reading the file content (just the frontmatter)
-                    tags = []
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            content = f.read(
-                                500
-                            )  # Read first 500 chars for frontmatter
-                            tags = self.extract_tags(content)
-                    except:
-                        pass  # Ignore read errors
+                    # Extract tags ONLY if requested (lazy-loading optimization)
+                    tags = None
+                    if include_tags:
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                content = f.read(
+                                    500
+                                )  # Read first 500 chars for frontmatter
+                                tags = self._extract_tags(content)
+                        except:
+                            pass  # Ignore read errors
 
                     note = NoteMetadata(
                         path=rel_path,
@@ -143,6 +162,10 @@ class ObsidianClient:
 
         except Exception as e:
             print(f"Warning: Could not scan filesystem for notes: {e}")
+
+        # Cache the results
+        self._filesystem_notes_cache = notes
+        self._filesystem_cache_timestamp = datetime.now()
 
         return notes
 
@@ -470,8 +493,8 @@ class ObsidianClient:
                 results = response.json()
 
                 # Enhance results with metadata if available
-                enhanced_results = []
-                for result in results:
+                # Use concurrent fetching for better performance
+                async def fetch_metadata_for_result(result):
                     enhanced_result = dict(result)
                     try:
                         # Add metadata if possible
@@ -486,9 +509,22 @@ class ObsidianClient:
                     except Exception:
                         # If metadata fails, continue without it
                         pass
-                    enhanced_results.append(enhanced_result)
+                    return enhanced_result
 
-                return enhanced_results
+                # Fetch all metadata concurrently using asyncio.gather
+                # Use return_exceptions=True to handle individual failures gracefully
+                enhanced_results = await asyncio.gather(
+                    *[fetch_metadata_for_result(result) for result in results],
+                    return_exceptions=True
+                )
+
+                # Filter out any exceptions and return valid results
+                valid_results = [
+                    result for result in enhanced_results
+                    if not isinstance(result, Exception)
+                ]
+
+                return valid_results
         except httpx.HTTPStatusError as e:
             raise ObsidianAPIError(
                 f"Search failed: {e.response.text}", e.response.status_code
@@ -554,18 +590,20 @@ class ObsidianClient:
             print(f"Warning: Could not list files: {e}")
             return []
 
-    async def list_notes(self, folder: Optional[str] = None) -> List[NoteMetadata]:
+    async def list_notes(self, folder: Optional[str] = None, include_tags: bool = False) -> List[NoteMetadata]:
         """
         List notes with metadata
 
         Args:
             folder: Optional folder to filter by
+            include_tags: Whether to extract tags from notes (expensive - use only when needed)
 
         Returns:
             List of NoteMetadata objects
         """
         # Use filesystem discovery for better note detection
-        all_notes = self._discover_notes_filesystem()
+        # By default, don't extract tags (lazy-loading optimization)
+        all_notes = self._discover_notes_filesystem(include_tags=include_tags, use_cache=True)
 
         # Filter by folder if specified
         if folder:
@@ -639,7 +677,8 @@ class ObsidianClient:
 
             # First, discover all notes using filesystem scanning
             # This is more reliable than the REST API for file discovery
-            filesystem_notes = self._discover_notes_filesystem()
+            # Don't include tags by default for better performance
+            filesystem_notes = self._discover_notes_filesystem(include_tags=False, use_cache=use_cache)
             notes.extend(filesystem_notes)
 
             # Process files to build structure
@@ -781,9 +820,11 @@ class ObsidianClient:
             raise ObsidianAPIError(f"Failed to get folder contents: {str(e)}")
 
     def invalidate_cache(self):
-        """Invalidate the vault structure cache"""
+        """Invalidate the vault structure cache and filesystem cache"""
         self._vault_structure_cache = None
         self._cache_timestamp = None
+        self._filesystem_notes_cache = None
+        self._filesystem_cache_timestamp = None
 
     # =================== Obsidian Command Execution ===================
 
