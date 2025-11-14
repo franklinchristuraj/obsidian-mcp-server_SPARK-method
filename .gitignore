@@ -57,3 +57,10 @@ recreate_obsidian_with_ports.sh
 # Temporary files
 tmp/
 temp/
+
+# Documentation that may contain sensitive info (already moved to docs/)
+# Keep these patterns for any future files
+*_STATUS.md
+*_ACCESS.md
+*_PASSWORDS.md
+*_SECRETS.md

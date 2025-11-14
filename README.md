@@ -22,18 +22,25 @@ A complete Model Context Protocol (MCP) server that provides AI assistants with 
 
 ```
 📁 obsidian-mcp-server/
-├── 📁 src/                    # Core application
+├── 📁 src/                    # Core application code
 ├── 📁 tests/                  # Test suite  
 ├── 📁 demos/                  # Example usage
-├── 📁 docs/                   # Documentation
+├── 📁 docs/                   # All documentation (see docs/README.md)
+│   ├── 📁 deployment/        # Deployment guides and configs
+│   ├── 📁 claude/            # Claude Desktop integration
+│   ├── 📁 guides/            # User guides
+│   ├── 📁 phases/            # Development phase docs
+│   └── 📁 setup/             # Setup guides
 ├── 📁 scripts/                # Utility scripts
-├── 📁 deploy/                 # Deployment configs
-├── main.py                    # Development server
-├── main_production.py         # Production server
-└── PROJECT_STRUCTURE.md       # Detailed structure guide
+├── main.py                    # Development server entry point
+├── main_production.py         # Production server entry point
+├── requirements.txt           # Python dependencies
+├── config.yaml.example        # Configuration template
+├── check_setup.py            # Setup verification script
+└── README.md                  # This file
 ```
 
-*See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for complete organization details.*
+*See [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) for complete organization details.*
 
 ## 🌟 Key Features
 

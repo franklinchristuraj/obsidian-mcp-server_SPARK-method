@@ -6,8 +6,9 @@ import uvicorn
 import os
 from dotenv import load_dotenv
 
-# Load production environment
+# Load production environment (fallback to .env if .env.production doesn't exist)
 load_dotenv(".env.production")
+load_dotenv(".env")  # Fallback to .env
 
 if __name__ == "__main__":
     # Production configuration

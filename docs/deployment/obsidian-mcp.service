@@ -1,0 +1,24 @@
+[Unit]
+Description=Obsidian MCP Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/franklinchris/obsidian-mcp-server
+Environment="PATH=/home/franklinchris/obsidian-mcp-server/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/franklinchris/obsidian-mcp-server/.env
+ExecStart=/home/franklinchris/obsidian-mcp-server/venv/bin/python3 main_production.py
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=obsidian-mcp
+
+[Install]
+WantedBy=default.target
+
