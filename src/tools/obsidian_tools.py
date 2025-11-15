@@ -72,17 +72,17 @@ class ObsidianTools:
             # Tool 3: obs_create_note
             MCPTool(
                 name="obs_create_note",
-                description="Create a new note in the Obsidian vault. Automatically applies templates based on folder location.",
+                description="Create a new note in the Obsidian vault. Automatically applies templates based on folder location. Supports flexible folder naming (e.g., 'meetings', 'work-meeting-notes' → '11_work-meeting-notes').",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path where the note should be created (e.g., 'Ideas/New Idea.md')",
+                            "description": "Path where the note should be created (e.g., 'meetings/2025-11-15 Standup.md', 'projects/New Project.md'). Folder names are normalized automatically: meetings/work-meeting-notes→11_work-meeting-notes, projects→02_projects, areas→03_areas, seeds/ideas→01_seeds, resources→04_resources, knowledge→05_knowledge, daily-notes/journal→06_daily-notes.",
                         },
                         "content": {
                             "type": "string",
-                            "description": "Content of the new note in Markdown format. If minimal, appropriate template will be applied.",
+                            "description": "Content of the new note in Markdown format. If minimal, appropriate template will be applied based on folder.",
                         },
                         "create_folders": {
                             "type": "boolean",
@@ -91,8 +91,30 @@ class ObsidianTools:
                         },
                         "use_template": {
                             "type": "boolean",
-                            "description": "Whether to apply appropriate template based on folder location (daily-notes, projects, areas, etc.)",
+                            "description": "Whether to apply appropriate template based on folder location (meeting-note, project, area, seed, resource, knowledge, daily-note)",
                             "default": True,
+                        },
+                        "template_vars": {
+                            "type": "object",
+                            "description": """Variables for template substitution. For meeting notes, supports smart structured data:
+- title: Meeting title
+- date: YYYY-MM-DD format
+- time: HH:MM format
+- meeting_type: Type (standup, planning, review, etc.)
+- attendees: List of names or dicts with {name, role}
+- agenda: List of agenda items
+- discussion: Raw discussion text/transcript
+- discussion_points: List of {topic, points[]}
+- action_items: List of {task, assignee, due_date}
+- decisions: List of decisions made
+- follow_up: Follow-up notes
+- notes: Additional observations
+- related_links: List of wiki links
+
+For other note types: title, date, datetime, time, project, area.
+
+Note: Meeting notes intelligently parse freeform content and only include sections with data.""",
+                            "additionalProperties": True,
                         },
                     },
                     "required": ["path", "content"],
@@ -396,10 +418,12 @@ class ObsidianTools:
         content: str,
         create_folders: bool = True,
         use_template: bool = True,
+        template_vars: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Tool 3: Create a new note with template support
         Automatically applies appropriate template based on folder location
+        Supports vault-based templates with variable substitution
         """
         if not self.client:
             raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
@@ -407,64 +431,189 @@ class ObsidianTools:
         try:
             from ..utils.template_utils import template_detector
 
+            # Normalize the path to use canonical folder names
+            original_path = path
+            normalized_path = template_detector.normalize_folder_path(path)
+            path_was_normalized = original_path != normalized_path
+
+            # Use the normalized path for note creation
+            path = normalized_path
+
             final_content = content
             template_applied = False
             note_type = None
+            template_source = "none"
 
             # Apply template if requested and appropriate
             if use_template:
                 note_type = template_detector.detect_note_type_from_path(path)
-                if note_type:
-                    # Check if content already has frontmatter
-                    existing_frontmatter, body = template_detector.extract_frontmatter(
-                        content
+
+                # Special handling for meeting notes - smart content building
+                if note_type == "meeting-note":
+                    # Extract note name from path
+                    note_name = (
+                        path.split("/")[-1]
+                        .replace(".md", "")
+                        .replace("-", " ")
+                        .title()
                     )
 
-                    if not existing_frontmatter:
-                        # Apply default frontmatter for this note type
-                        default_frontmatter = template_detector.get_default_frontmatter(
-                            note_type, path
-                        )
+                    # Check if we have structured data via template_vars
+                    if template_vars and any(
+                        k in template_vars
+                        for k in [
+                            "attendees",
+                            "agenda",
+                            "discussion",
+                            "action_items",
+                            "decisions",
+                        ]
+                    ):
+                        # Build from structured data
+                        meeting_data = {
+                            "title": template_vars.get("title", note_name),
+                            "date": template_vars.get("date", datetime.now().strftime("%Y-%m-%d")),
+                            "time": template_vars.get("time", ""),
+                            "meeting_type": template_vars.get("meeting_type", ""),
+                            "attendees": template_vars.get("attendees", []),
+                            "agenda": template_vars.get("agenda", []),
+                            "discussion": template_vars.get("discussion", ""),
+                            "discussion_points": template_vars.get("discussion_points", []),
+                            "action_items": template_vars.get("action_items", []),
+                            "decisions": template_vars.get("decisions", []),
+                            "follow_up": template_vars.get("follow_up", ""),
+                            "notes": template_vars.get("notes", ""),
+                            "related_links": template_vars.get("related_links", []),
+                        }
 
-                        # If no body content provided, use template body
-                        if not body.strip():
+                        frontmatter, body = template_detector.build_meeting_note_from_data(**meeting_data)
+                        final_content = template_detector.build_content_with_frontmatter(frontmatter, body)
+                        template_applied = True
+                        template_source = "smart-builder"
+
+                    # Check if content has substantial freeform text - parse it
+                    elif content.strip() and len(content.strip()) > 50:
+                        # Parse freeform content to extract structured data
+                        parsed_data = template_detector.parse_meeting_content(content)
+
+                        # Merge with any template_vars provided
+                        if template_vars:
+                            parsed_data.update(template_vars)
+
+                        # Add title if not provided
+                        if "title" not in parsed_data:
+                            parsed_data["title"] = template_vars.get("title", note_name) if template_vars else note_name
+
+                        # Build meeting note from parsed/merged data
+                        frontmatter, body = template_detector.build_meeting_note_from_data(**parsed_data)
+                        final_content = template_detector.build_content_with_frontmatter(frontmatter, body)
+                        template_applied = True
+                        template_source = "smart-parser"
+
+                # Only proceed with vault/hardcoded templates if smart builder didn't handle it
+                if not template_applied:
+                    # Check if vault-based template exists for this folder
+                    vault_template_path = template_detector.get_template_path_for_folder(path)
+
+                    if vault_template_path:
+                        # Try to read template from vault
+                        try:
+                            template_content = await self.client.read_note(vault_template_path)
+
+                            # Prepare default template variables
                             note_name = (
                                 path.split("/")[-1]
                                 .replace(".md", "")
                                 .replace("-", " ")
                                 .title()
                             )
-                            body = template_detector.get_default_body_template(
-                                note_type, note_name
+                            default_vars = {
+                                "title": note_name,
+                                "date": datetime.now().strftime("%Y-%m-%d"),
+                                "datetime": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "time": datetime.now().strftime("%H:%M"),
+                            }
+
+                            # Merge with user-provided template variables
+                            if template_vars:
+                                default_vars.update(template_vars)
+
+                            # Apply template variable substitution
+                            final_content = template_detector.apply_template(
+                                template_content, **default_vars
+                            )
+                            template_applied = True
+                            template_source = "vault"
+
+                        except Exception as template_error:
+                            # Fall back to hardcoded templates if vault template fails
+                            print(f"Warning: Could not read vault template {vault_template_path}: {template_error}")
+                            vault_template_path = None
+
+                    # Fall back to hardcoded templates if no vault template
+                    if not vault_template_path or not template_applied:
+                        if note_type:
+                            # Check if content already has frontmatter
+                            existing_frontmatter, body = template_detector.extract_frontmatter(
+                                content
                             )
 
-                        final_content = (
-                            template_detector.build_content_with_frontmatter(
-                                default_frontmatter, body
-                            )
-                        )
-                        template_applied = True
+                            if not existing_frontmatter:
+                                # Apply default frontmatter for this note type
+                                default_frontmatter = template_detector.get_default_frontmatter(
+                                    note_type, path
+                                )
+
+                                # If no body content provided, use template body
+                                if not body.strip():
+                                    note_name = (
+                                        path.split("/")[-1]
+                                        .replace(".md", "")
+                                        .replace("-", " ")
+                                        .title()
+                                    )
+                                    body = template_detector.get_default_body_template(
+                                        note_type, note_name
+                                    )
+
+                                final_content = (
+                                    template_detector.build_content_with_frontmatter(
+                                        default_frontmatter, body
+                                    )
+                                )
+                                template_applied = True
+                                template_source = "hardcoded"
 
             success = await self.client.create_note(path, final_content, create_folders)
 
             if success:
-                template_info = (
-                    f"\n🎯 Applied {note_type} template" if template_applied else ""
-                )
+                template_info = ""
+                if template_applied:
+                    if template_source == "vault":
+                        template_info = f"\n🎯 Applied {note_type} template from vault"
+                    else:
+                        template_info = f"\n🎯 Applied {note_type} template (hardcoded)"
+
+                path_info = ""
+                if path_was_normalized:
+                    path_info = f"\n📍 Path normalized: {original_path} → {path}"
 
                 return {
                     "content": [
                         {
                             "type": "text",
-                            "text": f"✅ Successfully created note: {path}{template_info}\n\nContent length: {len(final_content)} characters",
+                            "text": f"✅ Successfully created note: {path}{path_info}{template_info}\n\nContent length: {len(final_content)} characters",
                         }
                     ],
                     "metadata": {
                         "path": path,
+                        "original_path": original_path if path_was_normalized else path,
+                        "path_normalized": path_was_normalized,
                         "content_length": len(final_content),
                         "created_at": datetime.now().isoformat(),
                         "folders_created": create_folders,
                         "template_applied": template_applied,
+                        "template_source": template_source,
                         "note_type": note_type,
                     },
                 }
