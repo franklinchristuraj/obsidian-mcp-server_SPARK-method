@@ -29,6 +29,23 @@ All MCP requests require Bearer token authentication:
 Authorization: Bearer YOUR_API_KEY
 ```
 
+### 🔌 Claude.ai Connector Configuration
+
+When connecting via Claude.ai's connector interface, use these settings:
+
+**Connector Fields:**
+- **Remote URL**: `https://mcp.ziksaka.com/mcp`
+- **OAuth Client ID**: `franklinchris`
+- **OAuth Client Secret**: `REDACTED-LEAKED-KEY` *(your API key from `.env`)*
+
+**How it works:**
+The server accepts authentication via multiple methods:
+1. **Bearer token** in `Authorization` header (standard method)
+2. **OAuth-style**: `client_id` + `client_secret` query parameters or headers (for Claude.ai connectors)
+3. **Direct API key**: `api_key` query parameter or `X-API-Key` header (backward compatibility)
+
+The server validates that the **OAuth Client Secret** matches your `MCP_API_KEY` from `.env`. The **OAuth Client ID** should be set to `franklinchris`.
+
 ## 📝 Example Usage
 
 ### Health Check (No Auth)
