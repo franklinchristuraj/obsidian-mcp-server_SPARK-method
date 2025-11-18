@@ -651,21 +651,32 @@ class ObsidianClient:
 
     # =================== Vault Structure Operations ===================
 
-    async def get_vault_structure(self, use_cache: bool = True) -> VaultStructure:
+    async def get_vault_structure(self, use_cache: bool = True, include_notes: bool = False) -> VaultStructure:
         """
-        Get complete vault structure with folders and notes
+        Get vault structure with folders and optionally notes
 
         Args:
             use_cache: Whether to use cached structure if available
+            include_notes: If False, only return folder structure without individual note metadata (default: False)
 
         Returns:
-            VaultStructure object containing complete vault organization
+            VaultStructure object containing vault organization
         """
         # Check cache
         if use_cache and self._vault_structure_cache and self._cache_timestamp:
             cache_age = (datetime.now() - self._cache_timestamp).total_seconds()
             if cache_age < self._cache_ttl:
-                return self._vault_structure_cache
+                cached_structure = self._vault_structure_cache
+                # If notes not needed, return cached structure with empty notes list
+                if not include_notes:
+                    return VaultStructure(
+                        root_path=cached_structure.root_path,
+                        folders=cached_structure.folders,
+                        notes=[],
+                        total_notes=cached_structure.total_notes,
+                        total_folders=cached_structure.total_folders,
+                    )
+                return cached_structure
 
         try:
             # Get all files (folders from vault info)
@@ -674,12 +685,29 @@ class ObsidianClient:
             # Separate folders and notes
             folders = {}  # path -> FolderInfo
             notes = []
+            note_paths = set()  # For lightweight counting when include_notes=False
 
-            # First, discover all notes using filesystem scanning
-            # This is more reliable than the REST API for file discovery
-            # Don't include tags by default for better performance
-            filesystem_notes = self._discover_notes_filesystem(include_tags=False, use_cache=use_cache)
-            notes.extend(filesystem_notes)
+            if include_notes:
+                # Full discovery: discover all notes using filesystem scanning
+                # This is more reliable than the REST API for file discovery
+                # Don't include tags by default for better performance
+                filesystem_notes = self._discover_notes_filesystem(include_tags=False, use_cache=use_cache)
+                notes.extend(filesystem_notes)
+                note_paths.update(note.path for note in filesystem_notes)
+            else:
+                # Lightweight mode: just collect note paths for counting (no metadata)
+                # Use filesystem scan for accurate counting without loading metadata
+                if self.vault_path and os.path.exists(self.vault_path):
+                    try:
+                        md_pattern = os.path.join(self.vault_path, "**", "*.md")
+                        md_files = glob.glob(md_pattern, recursive=True)
+                        for file_path in md_files:
+                            rel_path = os.path.relpath(file_path, self.vault_path)
+                            rel_path = rel_path.replace(os.sep, "/")
+                            note_paths.add(rel_path)
+                    except Exception:
+                        # Fallback to list_files if filesystem scan fails
+                        pass
 
             # Process files to build structure
             for file_info in all_files:
@@ -697,40 +725,44 @@ class ObsidianClient:
                         subfolders_count=0,  # Will be updated later
                     )
 
-                    # Try to find some notes in this folder
-                    try:
-                        await self._discover_notes_in_folder(file_path, notes)
-                    except Exception:
-                        # Ignore errors in note discovery
-                        pass
+                    if include_notes:
+                        # Try to find some notes in this folder
+                        try:
+                            await self._discover_notes_in_folder(file_path, notes)
+                            note_paths.update(note.path for note in notes)
+                        except Exception:
+                            # Ignore errors in note discovery
+                            pass
 
                 # Handle notes (if we got any from file listings)
                 if file_path.endswith((".md", ".txt")):
-                    try:
-                        stat = file_info.get("stat", {})
-                        note = NoteMetadata(
-                            path=file_path,
-                            name=file_name,
-                            size=stat.get("size", 0),
-                            modified=datetime.fromtimestamp(stat.get("mtime", 0) / 1000)
-                            if stat.get("mtime")
-                            else datetime.now(),
-                            created=datetime.fromtimestamp(stat.get("ctime", 0) / 1000)
-                            if stat.get("ctime")
-                            else None,
-                        )
-                        notes.append(note)
-                    except Exception:
-                        continue
+                    note_paths.add(file_path)
+                    if include_notes:
+                        try:
+                            stat = file_info.get("stat", {})
+                            note = NoteMetadata(
+                                path=file_path,
+                                name=file_name,
+                                size=stat.get("size", 0),
+                                modified=datetime.fromtimestamp(stat.get("mtime", 0) / 1000)
+                                if stat.get("mtime")
+                                else datetime.now(),
+                                created=datetime.fromtimestamp(stat.get("ctime", 0) / 1000)
+                                if stat.get("ctime")
+                                else None,
+                            )
+                            notes.append(note)
+                        except Exception:
+                            continue
 
-            # Count notes and subfolders for each folder
+            # Count notes and subfolders for each folder (lightweight counting)
             for folder_path, folder_info in folders.items():
-                # Count notes in this folder
+                # Count notes in this folder using note_paths set (much faster)
                 folder_info.notes_count = sum(
                     1
-                    for note in notes
-                    if note.path.startswith(folder_path + "/")
-                    and "/" not in note.path[len(folder_path) + 1 :]
+                    for note_path in note_paths
+                    if note_path.startswith(folder_path + "/")
+                    and "/" not in note_path[len(folder_path) + 1 :]
                 )
 
                 # Count direct subfolders
@@ -741,19 +773,23 @@ class ObsidianClient:
                     and "/" not in other_path[len(folder_path) + 1 :]
                 )
 
+            # Calculate total notes count
+            total_notes = len(note_paths) if not include_notes else len(notes)
+
             # Create vault structure
             vault_info = await self.get_vault_info()
             structure = VaultStructure(
                 root_path=vault_info.get("path", self.vault_path),
                 folders=list(folders.values()),
-                notes=notes,
-                total_notes=len(notes),
+                notes=notes,  # Empty list if include_notes=False
+                total_notes=total_notes,
                 total_folders=len(folders),
             )
 
-            # Cache the result
-            self._vault_structure_cache = structure
-            self._cache_timestamp = datetime.now()
+            # Cache the result (only cache if include_notes=True to avoid caching incomplete data)
+            if include_notes:
+                self._vault_structure_cache = structure
+                self._cache_timestamp = datetime.now()
 
             return structure
 
@@ -775,7 +811,8 @@ class ObsidianClient:
         folder_path = folder_path.strip("/")
 
         try:
-            structure = await self.get_vault_structure()
+            # Need notes for folder contents, so use include_notes=True
+            structure = await self.get_vault_structure(include_notes=True)
 
             # Find the folder
             folder_info = None
@@ -896,7 +933,8 @@ class ObsidianClient:
     async def get_stats(self) -> Dict[str, Any]:
         """Get vault statistics"""
         try:
-            structure = await self.get_vault_structure()
+            # Need notes for stats, so use include_notes=True
+            structure = await self.get_vault_structure(include_notes=True)
             vault_info = await self.get_vault_info()
 
             # Calculate additional stats

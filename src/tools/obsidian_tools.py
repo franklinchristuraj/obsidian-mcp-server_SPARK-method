@@ -206,7 +206,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             # Tool 8: obs_get_vault_structure
             MCPTool(
                 name="obs_get_vault_structure",
-                description="Get the complete folder and note structure of the vault",
+                description="Get the high-level folder structure of the vault with note counts per folder. Returns only folder names and organization without individual file details.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -812,40 +812,34 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
     async def get_vault_structure(self, use_cache: bool = True) -> Dict[str, Any]:
         """
-        Tool 8: Get complete vault structure
+        Tool 8: Get high-level vault structure (folders only, no individual files)
         """
         if not self.client:
             raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
 
         try:
-            structure = await self.client.get_vault_structure(use_cache)
+            # Use include_notes=False to get only folder structure without individual file metadata
+            structure = await self.client.get_vault_structure(use_cache=use_cache, include_notes=False)
 
-            # Build response text
+            # Build response text with folder structure only
             response_text = f"# Vault Structure\n\n"
             response_text += f"**Root:** {structure.root_path}\n"
             response_text += f"**Total Notes:** {structure.total_notes}\n"
             response_text += f"**Total Folders:** {structure.total_folders}\n\n"
 
-            # Add folder structure
+            # Add folder structure with hierarchical indentation
             response_text += "## Folder Structure\n\n"
-            for folder in structure.folders:
-                indent = "  " * folder.path.count("/")
-                response_text += f"{indent}📁 {folder.name}/ ({folder.notes_count} notes, {folder.subfolders_count} subfolders)\n"
+            # Sort folders by path for better readability
+            sorted_folders = sorted(structure.folders, key=lambda f: f.path)
+            for folder in sorted_folders:
+                indent = "  " * (folder.path.count("/") if folder.path else 0)
+                folder_line = f"{indent}📁 {folder.name}/ ({folder.notes_count} notes"
+                if folder.subfolders_count > 0:
+                    folder_line += f", {folder.subfolders_count} subfolders"
+                folder_line += ")\n"
+                response_text += folder_line
 
-            # Add notes overview
-            response_text += "\n## Notes Overview\n\n"
-            for note in structure.notes[:20]:  # Limit to first 20
-                folder_name = (
-                    "/".join(note.path.split("/")[:-1]) if "/" in note.path else "Root"
-                )
-                response_text += (
-                    f"📝 {note.name} ({note.size:,} bytes) in {folder_name}\n"
-                )
-
-            if len(structure.notes) > 20:
-                response_text += f"\n... and {len(structure.notes) - 20} more notes"
-
-            # Prepare metadata
+            # Prepare metadata (folders only, no individual notes)
             folders_data = [
                 {
                     "path": folder.path,
@@ -854,18 +848,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "notes_count": folder.notes_count,
                     "subfolders_count": folder.subfolders_count,
                 }
-                for folder in structure.folders
-            ]
-
-            notes_data = [
-                {
-                    "path": note.path,
-                    "name": note.name,
-                    "size": note.size,
-                    "modified": note.modified.isoformat(),
-                    "created": note.created.isoformat() if note.created else None,
-                }
-                for note in structure.notes
+                for folder in sorted_folders
             ]
 
             return {
@@ -875,7 +858,6 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "total_notes": structure.total_notes,
                     "total_folders": structure.total_folders,
                     "folders": folders_data,
-                    "notes": notes_data,
                     "cached": use_cache,
                 },
             }
