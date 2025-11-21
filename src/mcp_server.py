@@ -101,6 +101,9 @@ class MCPProtocolHandler:
             else:
                 raise ValueError(f"Method not found: {method}")
 
+        except ValueError as e:
+            # Re-raise ValueError to preserve it for METHOD_NOT_FOUND handling
+            raise
         except Exception as e:
             raise Exception(f"Error handling {method}: {str(e)}")
 
