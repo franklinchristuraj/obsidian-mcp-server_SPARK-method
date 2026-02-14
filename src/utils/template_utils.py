@@ -124,6 +124,7 @@ class TemplateDetector:
         """
         Apply variable substitution to template content
         Simple .replace() for {{variable}} syntax
+        Also handles Obsidian template variables like { date:YYYY-MM-DD }
 
         Args:
             template_content: The template file content from vault
@@ -134,8 +135,20 @@ class TemplateDetector:
         """
         result = template_content
         for key, value in variables.items():
-            # Replace {{key}} with value
+            # Replace {{key}} with value (Python template syntax)
             result = result.replace(f"{{{{{key}}}}}", str(value))
+        
+        # Handle Obsidian template variables in frontmatter
+        # Replace { date:YYYY-MM-DD } with actual date
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        result = result.replace("{ date:YYYY-MM-DD }", today)
+        result = result.replace("'{ date:YYYY-MM-DD }'", today)
+        result = result.replace('"{ date:YYYY-MM-DD }"', today)
+        
+        # Replace other common Obsidian date formats
+        result = result.replace("{ date:dddd, MMMM Do YYYY }", datetime.now().strftime("%A, %B %d, %Y"))
+        
         return result
 
     def extract_frontmatter(self, content: str) -> Tuple[Dict[str, Any], str]:
@@ -459,12 +472,24 @@ class TemplateDetector:
         existing_frontmatter, existing_body = self.extract_frontmatter(existing_content)
         new_frontmatter, new_body = self.extract_frontmatter(new_content)
 
-        # Merge frontmatter - preserve existing fields, add new ones carefully
-        merged_frontmatter = existing_frontmatter.copy()
+        # Clean up broken template variables in existing frontmatter
+        # Obsidian template variables like '{ date:YYYY-MM-DD }' should be removed/replaced
+        cleaned_existing = {}
+        for key, value in existing_frontmatter.items():
+            # Skip broken template variables (keys that look like template syntax)
+            if isinstance(key, str) and ('{' in key or 'date:' in key.lower()):
+                continue
+            # Skip null values that are template placeholders
+            if value is None or (isinstance(value, dict) and any('{' in str(k) for k in value.keys())):
+                continue
+            cleaned_existing[key] = value
 
-        # Only add new fields that are appropriate for the note type
-        for key, value in new_frontmatter.items():
-            if key not in merged_frontmatter or not merged_frontmatter[key]:
+        # Merge frontmatter - use new frontmatter as base, preserve existing non-template fields
+        merged_frontmatter = new_frontmatter.copy()
+
+        # Preserve existing fields that aren't in new content and aren't template variables
+        for key, value in cleaned_existing.items():
+            if key not in merged_frontmatter:
                 merged_frontmatter[key] = value
 
         # Use new body content but preserve structure if minimal changes

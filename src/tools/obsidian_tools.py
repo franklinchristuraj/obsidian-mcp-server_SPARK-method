@@ -72,7 +72,7 @@ class ObsidianTools:
             # Tool 3: obs_create_note
             MCPTool(
                 name="obs_create_note",
-                description="Create a new note in the Obsidian vault. Automatically applies templates based on folder location. Supports flexible folder naming (e.g., 'meetings', 'work-meeting-notes' → '11_work-meeting-notes').",
+                description="Create a new note in the Obsidian vault. If content includes frontmatter (---), it will be used as-is. If content has no frontmatter, templates may be applied based on folder location. Supports flexible folder naming.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -82,7 +82,7 @@ class ObsidianTools:
                         },
                         "content": {
                             "type": "string",
-                            "description": "Content of the new note in Markdown format. If minimal, appropriate template will be applied based on folder.",
+                            "description": "Content of the new note in Markdown format. If content includes frontmatter (starts with ---), it will be used exactly as provided. If no frontmatter, a template may be applied.",
                         },
                         "create_folders": {
                             "type": "boolean",
@@ -444,8 +444,15 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             note_type = None
             template_source = "none"
 
+            # Check if user provided content with frontmatter
+            # If frontmatter exists, user has structured their content - don't override with templates
+            existing_frontmatter, body = template_detector.extract_frontmatter(content)
+            user_provided_frontmatter = bool(existing_frontmatter)
+
             # Apply template if requested and appropriate
-            if use_template:
+            # BUT: NEVER override if user provided their own frontmatter
+            # This respects user's explicit content structure
+            if use_template and not user_provided_frontmatter:
                 note_type = template_detector.detect_note_type_from_path(path)
 
                 # Special handling for meeting notes - smart content building
@@ -539,9 +546,17 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                                 default_vars.update(template_vars)
 
                             # Apply template variable substitution
-                            final_content = template_detector.apply_template(
+                            templated_content = template_detector.apply_template(
                                 template_content, **default_vars
                             )
+                            
+                            # Append user's original content to the template
+                            # This preserves any content provided even without frontmatter
+                            if content.strip():
+                                final_content = templated_content + "\n\n" + content.strip()
+                            else:
+                                final_content = templated_content
+                            
                             template_applied = True
                             template_source = "vault"
 
@@ -564,7 +579,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                                     note_type, path
                                 )
 
-                                # If no body content provided, use template body
+                                # Use the body content (original content without frontmatter)
+                                # If body is empty, use template body
                                 if not body.strip():
                                     note_name = (
                                         path.split("/")[-1]
@@ -576,6 +592,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                                         note_type, note_name
                                     )
 
+                                # Build final content with frontmatter + body (preserves original content)
                                 final_content = (
                                     template_detector.build_content_with_frontmatter(
                                         default_frontmatter, body
@@ -590,9 +607,15 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 template_info = ""
                 if template_applied:
                     if template_source == "vault":
-                        template_info = f"\n🎯 Applied {note_type} template from vault"
-                    else:
-                        template_info = f"\n🎯 Applied {note_type} template (hardcoded)"
+                        template_info = f"\n🎯 Applied {note_type} template from vault + your content"
+                    elif template_source == "smart-builder":
+                        template_info = f"\n🎯 Built {note_type} from structured data"
+                    elif template_source == "smart-parser":
+                        template_info = f"\n🎯 Parsed {note_type} from content"
+                    elif template_source == "hardcoded":
+                        template_info = f"\n🎯 Applied {note_type} template + your content"
+                elif use_template and user_provided_frontmatter:
+                    template_info = f"\n📝 Used your content as-is (frontmatter detected)"
 
                 path_info = ""
                 if path_was_normalized:
@@ -638,9 +661,38 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
         try:
             from ..utils.template_utils import template_detector
+            import re
 
             final_content = content
             format_preserved = False
+            date_mismatch_warning = ""
+
+            # Check for date mismatch between path and content (for daily notes)
+            if "daily-notes" in path or "06_daily-notes" in path:
+                # Extract date from path (format: YYYY-MM-DD)
+                path_date_match = re.search(r'(\d{4}-\d{2}-\d{2})', path)
+                if path_date_match:
+                    path_date = path_date_match.group(1)
+                    
+                    # Extract date from content frontmatter
+                    frontmatter, _ = template_detector.extract_frontmatter(content)
+                    content_date = None
+                    if "creation-date" in frontmatter:
+                        content_date_str = str(frontmatter["creation-date"])
+                        # Extract YYYY-MM-DD from the date string
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', content_date_str)
+                        if date_match:
+                            content_date = date_match.group(1)
+                    
+                    # Also check the heading for date
+                    heading_match = re.search(r'(\d{4})', content)
+                    content_year = heading_match.group(1) if heading_match else None
+                    
+                    # Warn if dates don't match
+                    if content_date and path_date != content_date:
+                        date_mismatch_warning = f"\n⚠️  Date mismatch detected: Path has {path_date} but content has {content_date}. Consider updating the path to match the content date."
+                    elif content_year and path_date[:4] != content_year:
+                        date_mismatch_warning = f"\n⚠️  Year mismatch detected: Path has year {path_date[:4]} but content mentions year {content_year}. Consider updating the path to match the content date."
 
             # Preserve existing format if requested
             if preserve_format:
@@ -669,7 +721,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "content": [
                         {
                             "type": "text",
-                            "text": f"✅ Successfully updated note: {path}{format_info}\n\nNew content length: {len(final_content)} characters",
+                            "text": f"✅ Successfully updated note: {path}{format_info}{date_mismatch_warning}\n\nNew content length: {len(final_content)} characters",
                         }
                     ],
                     "metadata": {
@@ -677,6 +729,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "content_length": len(final_content),
                         "updated_at": datetime.now().isoformat(),
                         "format_preserved": format_preserved,
+                        "date_mismatch_warning": date_mismatch_warning if date_mismatch_warning else None,
                     },
                 }
             else:
