@@ -8,6 +8,31 @@ import time
 from typing import Dict, Any, Optional, List, AsyncGenerator
 from .types import MCPMessageType, MCPTool, MCPResource, MCPCapabilities, MCPPrompt
 
+# prompts/get "description" must match each prompt (not a generic template blurb)
+_PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
+    "vault_mcp_agent_guide": (
+        "Canonical guide: workspace folders (personal/passion/work), MCP tool choice, "
+        "scope parameter, paths vs resources—read this before other vault prompts."
+    ),
+    "note_template_system": (
+        "SPARK-style folders and YAML templates; paths are under a workspace "
+        "(personal/passion/work) when using MCP tools—pair with vault_mcp_agent_guide."
+    ),
+    "daily_note_template": (
+        "Daily note YAML and sections; MCP path is e.g. 06_daily-notes/YYYY-MM-DD.md "
+        "plus scope=personal (or allowed workspace)."
+    ),
+    "project_note_template": (
+        "Project note YAML under 02_projects/; set MCP scope to the workspace that owns the project."
+    ),
+    "area_note_template": (
+        "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work) from context."
+    ),
+    "format_preservation_rules": (
+        "YAML and structure preservation when editing via MCP; paths remain workspace-relative."
+    ),
+}
+
 
 class MCPProtocolHandler:
     """
@@ -19,14 +44,17 @@ class MCPProtocolHandler:
         self.session_initialized: bool = False
         self.protocol_version = "2024-11-05"
         self.server_info = {
-            "name": "multi-app-mcp-server",
-            "version": "2.0.0",
-            "description": "Scalable MCP Server with Obsidian integration and extensible architecture for future applications",
+            "name": "obsidian-mcp-server",
+            "version": "2.1.0",
+            "description": (
+                "Obsidian MCP server with workspace-scoped tools (personal / passion / work). "
+                "Use MCP prompt vault_mcp_agent_guide for tool choice, paths, and scope rules."
+            ),
         }
         self.capabilities = MCPCapabilities(
-            tools={"listChanged": True},
-            resources={"subscribe": True, "listChanged": True},
-            prompts={"listChanged": True},
+            tools={"listChanged": False},
+            resources={"subscribe": False, "listChanged": False},
+            prompts={"listChanged": False},
             logging={},
         )
 
@@ -34,7 +62,10 @@ class MCPProtocolHandler:
         self.tools: List[MCPTool] = [
             MCPTool(
                 name="ping",
-                description="Test connectivity to the MCP server",
+                description=(
+                    "Test connectivity; server is workspace-aware (personal/passion/work). "
+                    "For tool and path rules, load the vault_mcp_agent_guide prompt."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {},
@@ -386,8 +417,12 @@ class MCPProtocolHandler:
 
             content = await obsidian_prompts.get_prompt_content(name, arguments)
 
+            description = _PROMPTS_GET_DESCRIPTIONS.get(
+                name,
+                f"MCP prompt: {name}",
+            )
             return {
-                "description": f"Template and formatting instructions for {name}",
+                "description": description,
                 "messages": [
                     {
                         "role": "user",

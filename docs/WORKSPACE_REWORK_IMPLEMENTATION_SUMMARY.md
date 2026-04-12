@@ -47,6 +47,12 @@ This document summarizes **Phase 2 (MCP server)** of the workspace-aware vault d
 - The vault is expected to use top-level folders **`personal/`**, **`passion/`**, **`work/`** so server-built paths align with the filesystem.
 - OAuth clients from dynamic registration should be listed under `oauth_clients` if they must not receive the full default scope list.
 
+## MCP prompts & resources (agent context)
+
+- **Prompt `vault_mcp_agent_guide`** — Canonical instructions for workspaces, tool choice, `scope`, paths, and resources vs tools ([`src/prompts/obsidian_prompts.py`](../src/prompts/obsidian_prompts.py)).
+- Template prompts reference workspace-relative MCP paths and point to that guide.
+- Resource listings add workspace hints in descriptions; root description notes resources are not scope-filtered ([`src/resources/obsidian_resources.py`](../src/resources/obsidian_resources.py)).
+
 ## Testing
 
 - [`tests/test_workspace_scope.py`](../tests/test_workspace_scope.py) — Scope helpers, template prefix, auth JSON sample, routed tool set.

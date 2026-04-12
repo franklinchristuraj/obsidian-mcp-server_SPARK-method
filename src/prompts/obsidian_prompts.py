@@ -2,7 +2,7 @@
 Obsidian MCP Prompts - Template and Format Instructions
 Provides AI assistants with context about note templates and formatting rules
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from ..types import MCPPrompt
 
 
@@ -14,14 +14,28 @@ class ObsidianPrompts:
     def get_prompts(self) -> List[MCPPrompt]:
         """Get all available prompts for note formatting and templates"""
         return [
+            MCPPrompt(
+                name="vault_mcp_agent_guide",
+                description=(
+                    "Canonical guide: workspace folders (personal/passion/work), MCP tool choice, "
+                    "scope parameter, paths vs resources—read this before other vault prompts."
+                ),
+                arguments=[],
+            ),
             # Prompt 1: Note Template System Overview
             MCPPrompt(
                 name="note_template_system",
-                description="Learn about the Obsidian vault's note template system and formatting conventions",
+                description=(
+                    "SPARK-style folders and YAML templates; paths are under a workspace "
+                    "(personal/passion/work) when using MCP tools—pair with vault_mcp_agent_guide."
+                ),
                 arguments=[
                     {
                         "name": "note_type",
-                        "description": "Type of note to get template information for",
+                        "description": (
+                            "Optional: daily, project, area, seed, resource, or knowledge "
+                            "(limits the prompt to that section; omit for the full overview)."
+                        ),
                         "required": False,
                     }
                 ],
@@ -29,7 +43,10 @@ class ObsidianPrompts:
             # Prompt 2: Daily Note Template
             MCPPrompt(
                 name="daily_note_template",
-                description="Get the template and format for daily notes with proper YAML frontmatter",
+                description=(
+                    "Daily note YAML and sections; MCP path is e.g. 06_daily-notes/YYYY-MM-DD.md "
+                    "plus scope=personal (or allowed workspace)."
+                ),
                 arguments=[
                     {
                         "name": "date",
@@ -41,7 +58,9 @@ class ObsidianPrompts:
             # Prompt 3: Project Note Template
             MCPPrompt(
                 name="project_note_template",
-                description="Get the template and format for project notes with proper metadata fields",
+                description=(
+                    "Project note YAML under 02_projects/; set MCP scope to the workspace that owns the project."
+                ),
                 arguments=[
                     {
                         "name": "project_name",
@@ -53,7 +72,9 @@ class ObsidianPrompts:
             # Prompt 4: Area Note Template
             MCPPrompt(
                 name="area_note_template",
-                description="Get the template and format for area notes (ongoing responsibilities)",
+                description=(
+                    "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work) from context."
+                ),
                 arguments=[
                     {
                         "name": "area_name",
@@ -65,7 +86,9 @@ class ObsidianPrompts:
             # Prompt 5: Format Preservation Guidelines
             MCPPrompt(
                 name="format_preservation_rules",
-                description="Guidelines for preserving existing note formats when editing",
+                description=(
+                    "YAML and structure preservation when editing via MCP; paths remain workspace-relative."
+                ),
                 arguments=[],
             ),
         ]
@@ -77,6 +100,8 @@ class ObsidianPrompts:
         if arguments is None:
             arguments = {}
 
+        if prompt_name == "vault_mcp_agent_guide":
+            return self._get_vault_mcp_agent_guide()
         if prompt_name == "note_template_system":
             return self._get_template_system_prompt(arguments.get("note_type"))
         elif prompt_name == "daily_note_template":
@@ -90,9 +115,82 @@ class ObsidianPrompts:
         else:
             raise ValueError(f"Unknown prompt: {prompt_name}")
 
-    def _get_template_system_prompt(self, note_type: str = None) -> str:
-        """Template system overview prompt"""
-        return """# Obsidian Vault Template System
+    def _get_vault_mcp_agent_guide(self) -> str:
+        """Single source of truth for agents using workspace-scoped MCP tools."""
+        return """# Vault workspaces and MCP tools (agent guide)
+
+## 1. Three workspaces
+
+The vault is split into top-level folders (scopes):
+
+| Scope | Typical use |
+|-------|-------------|
+| `personal` | Journal, family, finances, health, trips, people |
+| `passion` | Research, side projects, content, learning, blueprints |
+| `work` | Employer projects, meetings, stakeholders, OKRs |
+
+Each scope has its own `00_system/templates/`, `01_seeds/`, `02_projects/`, etc. Same relative path in two scopes is **two different notes**.
+
+## 2. Start with `workspaces`
+
+Call the **`workspaces`** tool once per session (or when unsure). It returns which scopes this **API key** may use. Do not assume access to all three.
+
+## 3. Paths and `scope`
+
+- **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `02_projects/My Project.md`.
+- **Work meeting notes** use **`scope=work`** and paths under **`11_work-meeting-notes/`** (aligned with meeting templates in `template_utils`).
+- **Never** put `personal/`, `passion/`, or `work/` as the first segment of `path`. Use the **`scope`** parameter instead.
+- **Reads** (`search`, `list_notes`, `list_journal`, `read_note`, `note_exists`, `vault_structure`): optional `scope`. Omit it to search/list across **all scopes allowed for this key**; set it to narrow to one workspace.
+- **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`): if the key has **more than one** allowed scope, **`scope` is required**. If the key has exactly one scope, it is auto-selected.
+
+## 4. Which tool when
+
+| Goal | Tool | Notes |
+|------|------|--------|
+| See allowed scopes | `workspaces` | No arguments |
+| Folder tree + counts | `vault_structure` | Optional `scope` |
+| Browse files | `list_notes` | Optional `folder`, `scope` |
+| Daily notes in date range | `list_journal` | `startDate`, `endDate`; optional `scope` |
+| Find text in bodies | `search` | `keyword`; optional `folder`, `scope` |
+| Read one file | `read_note` | `path`; optional `scope` (required if same path exists in two allowed scopes) |
+| Check existence | `note_exists` | Same pattern as read |
+| Create | `create_note` | `path`, `content`; `scope` if multi-scope key |
+| Replace body | `update_note` | `scope` if multi-scope key |
+| Append | `append_note` | `scope` if multi-scope key |
+| Delete | `delete_note` | `scope` if multi-scope key |
+
+**Canonical names** above; **`obs_*` aliases** still work (e.g. `obs_keyword_search` → `search`).
+
+**Removed:** `obs_search_notes`, `obs_execute_command` — do not call them.
+
+## 5. MCP resources vs tools
+
+- **`resources/list`** and **`resources/read`** use URIs like `obsidian://notes/personal/06_daily-notes/...` and show the **full physical vault tree**.
+- They are **not** filtered by API-key workspace scope. If the connection is restricted (e.g. work-only key), **prefer `list_notes`, `read_note`, and `search`** with `scope` so the server enforces access.
+
+## 6. Claude / Cursor skills (outside this server)
+
+Align user-facing skills with: routing rules (which scope for which topic), new tool names, and “call `workspaces` first.” Work-only assistants should not describe personal/passion.
+
+## 7. Template prompts
+
+After this guide, use **`note_template_system`** and the type-specific prompts for YAML and section structure. Template paths on disk include the workspace (e.g. `personal/00_system/templates/...`); MCP **`create_note`** resolves templates using the **`scope`** you pass.
+
+---
+*Maintain this prompt when tools or scope rules change; keep it the single agent-facing summary.*
+"""
+
+    def _get_template_system_prompt(self, note_type: Optional[str] = None) -> str:
+        """Template system overview prompt; optional note_type returns one section + shared rules."""
+        full = """# Obsidian Vault Template System
+
+## MCP tools and workspace paths
+
+When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. The same folder names below exist **inside each** of `personal/`, `passion/`, and `work/` on disk.
+
+For **tool choice, scope rules, and resources vs tools**, load the **`vault_mcp_agent_guide`** prompt first.
+
+---
 
 This vault uses a structured template system with YAML frontmatter for different note types:
 
@@ -141,17 +239,55 @@ This vault uses a structured template system with YAML frontmatter for different
 - Always include creation date and appropriate tags
 - Link related notes using [[note-name]] syntax
 """
+        raw = (note_type or "").strip().lower()
+        aliases = {
+            "daily_note": "daily",
+            "dailies": "daily",
+            "06_daily-notes": "daily",
+            "projects": "project",
+            "areas": "area",
+            "seeds": "seed",
+            "resources": "resource",
+            "04_resources": "resource",
+            "05_knowledge": "knowledge",
+        }
+        key = aliases.get(raw, raw if raw else None)
+        if key not in {
+            "daily",
+            "project",
+            "area",
+            "seed",
+            "resource",
+            "knowledge",
+        }:
+            return full
+
+        section_bounds = {
+            "daily": ("### 1. Daily Notes (06_daily-notes/)", "### 2. Projects (02_projects/)"),
+            "project": ("### 2. Projects (02_projects/)", "### 3. Areas (03_areas/)"),
+            "area": ("### 3. Areas (03_areas/)", "### 4. Seeds (01_seeds/)"),
+            "seed": ("### 4. Seeds (01_seeds/)", "### 5. Resources (04_resources/)"),
+            "resource": ("### 5. Resources (04_resources/)", "### 6. Knowledge (05_knowledge/)"),
+            "knowledge": ("### 6. Knowledge (05_knowledge/)", "## Key Principles"),
+        }
+        start_m, end_m = section_bounds[key]
+        i = full.index(start_m)
+        j = full.index(end_m)
+        head = full[: full.index("## Note Types & Folders")] + "## Note Types & Folders\n\n"
+        tail = full[full.index("## Key Principles") :]
+        return head + full[i:j].rstrip() + "\n\n" + tail
 
     def _get_daily_note_template(self, date: str = None) -> str:
         """Daily note template prompt"""
         date_placeholder = date or "YYYY-MM-DD"
         return f"""# Daily Note Template
 
-Use this template for daily notes in the `06_daily-notes/` folder:
+Use this template for daily notes in the `06_daily-notes/` folder (under the chosen workspace).
 
 ## File Structure
 - **Filename**: `{date_placeholder}.md`
-- **Location**: `06_daily-notes/`
+- **MCP path**: `06_daily-notes/{date_placeholder}.md` with `scope` set to the correct workspace (often `personal`).
+- **On disk**: `{scope}/06_daily-notes/...`
 
 ## Template:
 
@@ -210,11 +346,12 @@ tags:
         name_placeholder = project_name or "[Project Name]"
         return f"""# Project Note Template
 
-Use this template for project notes in the `02_projects/` folder:
+Use this template for project notes in the `02_projects/` folder inside a workspace.
 
 ## File Structure
 - **Filename**: `{name_placeholder.lower().replace(' ', '-')}.md`
-- **Location**: `02_projects/`
+- **MCP path**: `02_projects/<filename>.md` plus required `scope` when the key has multiple workspaces.
+- **On disk**: `{scope}/02_projects/...`
 
 ## Template:
 
@@ -286,11 +423,12 @@ agent_context: Actionable goal with specific deadline and measurable outcome
         name_placeholder = area_name or "[Area Name]"
         return f"""# Area Note Template
 
-Use this template for area notes in the `03_areas/` folder:
+Use this template for area notes in the `03_areas/` folder inside a workspace.
 
 ## File Structure
 - **Filename**: `{name_placeholder.lower().replace(' ', '-')}.md`
-- **Location**: `03_areas/`
+- **MCP path**: `03_areas/<filename>.md` with appropriate `scope` (personal vs passion vs work).
+- **On disk**: `{scope}/03_areas/...`
 
 ## Template:
 
@@ -363,6 +501,8 @@ agent_context: Ongoing life responsibility requiring continuous attention
     def _get_format_preservation_rules(self) -> str:
         """Format preservation guidelines"""
         return """# Format Preservation Rules
+
+When editing existing notes via **MCP**, use **`update_note`** / **`append_note`** with the same **workspace-relative `path`** and **`scope`** you would use for **`read_note`**. Do not strip or rename YAML fields unless the user asked for a structural change.
 
 When editing existing notes in this vault, follow these critical guidelines:
 

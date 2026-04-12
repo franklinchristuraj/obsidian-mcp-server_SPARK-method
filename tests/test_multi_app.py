@@ -136,7 +136,7 @@ async def test_server_info():
         )
 
         server_info = response.get("serverInfo", {})
-        if server_info.get("name") == "multi-app-mcp-server":
+        if server_info.get("name") == "obsidian-mcp-server":
             print(f"✅ Server info correct: {server_info}")
             return True
         else:
