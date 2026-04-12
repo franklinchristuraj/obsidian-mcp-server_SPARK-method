@@ -127,6 +127,8 @@ class ObsidianClient:
                     rel_path = os.path.relpath(file_path, self.vault_path)
                     # Convert Windows paths to forward slashes
                     rel_path = rel_path.replace(os.sep, "/")
+                    if ".obsidian" in rel_path.split("/"):
+                        continue
 
                     # Get file stats
                     stat = os.stat(file_path)
@@ -704,6 +706,8 @@ class ObsidianClient:
                         for file_path in md_files:
                             rel_path = os.path.relpath(file_path, self.vault_path)
                             rel_path = rel_path.replace(os.sep, "/")
+                            if ".obsidian" in rel_path.split("/"):
+                                continue
                             note_paths.add(rel_path)
                     except Exception:
                         # Fallback to list_files if filesystem scan fails
@@ -755,14 +759,13 @@ class ObsidianClient:
                         except Exception:
                             continue
 
-            # Count notes and subfolders for each folder (lightweight counting)
+            # Recursive note count per folder (all .md under this path)
             for folder_path, folder_info in folders.items():
-                # Count notes in this folder using note_paths set (much faster)
                 folder_info.notes_count = sum(
                     1
                     for note_path in note_paths
-                    if note_path.startswith(folder_path + "/")
-                    and "/" not in note_path[len(folder_path) + 1 :]
+                    if note_path == folder_path
+                    or note_path.startswith(folder_path + "/")
                 )
 
                 # Count direct subfolders

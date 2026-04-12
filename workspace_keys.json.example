@@ -1,0 +1,26 @@
+{
+  "keys": {
+    "sk_admin_REPLACE_ME": {
+      "name": "Admin",
+      "scopes": ["personal", "passion", "work"],
+      "role": "admin"
+    },
+    "sk_personal_REPLACE_ME": {
+      "name": "Personal Claude",
+      "scopes": ["personal", "passion"],
+      "role": "user"
+    },
+    "sk_work_REPLACE_ME": {
+      "name": "Work Claude",
+      "scopes": ["work"],
+      "role": "user"
+    }
+  },
+  "oauth_clients": {
+    "paste-oauth-client-id-here": {
+      "name": "Claude web client",
+      "scopes": ["personal", "passion", "work"],
+      "role": "user"
+    }
+  }
+}

@@ -23,21 +23,29 @@ def verify_tool_registration():
     registered_tools = mcp_handler.tools
     print(f"\n📊 Total tools registered: {len(registered_tools)}")
     
-    # Expected tools based on documentation
     expected_tools = [
         "ping",
-        "obs_search_notes",
-        "obs_read_note",
-        "obs_create_note",
-        "obs_update_note",
-        "obs_append_note",
-        "obs_delete_note",
-        "obs_list_notes",
+        "workspaces",
+        "vault_structure",
         "obs_get_vault_structure",
-        "obs_execute_command",
-        "obs_keyword_search",
-        "obs_check_note_exists",
+        "list_notes",
+        "obs_list_notes",
+        "list_journal",
         "obs_list_daily_notes",
+        "search",
+        "obs_keyword_search",
+        "read_note",
+        "obs_read_note",
+        "create_note",
+        "obs_create_note",
+        "update_note",
+        "obs_update_note",
+        "append_note",
+        "obs_append_note",
+        "note_exists",
+        "obs_check_note_exists",
+        "delete_note",
+        "obs_delete_note",
     ]
     
     registered_names = [tool.name for tool in registered_tools]

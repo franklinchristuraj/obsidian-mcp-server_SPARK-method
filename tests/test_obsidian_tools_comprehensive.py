@@ -25,7 +25,6 @@ async def test_tool_discovery():
         obs_tools = [t for t in tools if t["name"].startswith("obs_")]
 
         expected_tools = [
-            "obs_search_notes",
             "obs_read_note",
             "obs_create_note",
             "obs_update_note",
@@ -33,8 +32,9 @@ async def test_tool_discovery():
             "obs_delete_note",
             "obs_list_notes",
             "obs_get_vault_structure",
-            "obs_execute_command",
             "obs_keyword_search",
+            "obs_check_note_exists",
+            "obs_list_daily_notes",
         ]
 
         print(f"✅ Found {len(obs_tools)} Obsidian tools")
@@ -113,9 +113,9 @@ async def test_tool_execution():
     # Test cases for each tool
     test_cases = [
         {
-            "name": "obs_search_notes",
-            "args": {"query": "test"},
-            "description": "Search notes",
+            "name": "obs_keyword_search",
+            "args": {"keyword": "test"},
+            "description": "Keyword search",
         },
         {
             "name": "obs_read_note",
@@ -144,14 +144,9 @@ async def test_tool_execution():
             "description": "Get vault structure",
         },
         {
-            "name": "obs_execute_command",
-            "args": {"command": "app:reload"},
-            "description": "Execute command",
-        },
-        {
-            "name": "obs_keyword_search",
-            "args": {"keyword": "test"},
-            "description": "Keyword search",
+            "name": "obs_check_note_exists",
+            "args": {"path": "nonexistent.md"},
+            "description": "Note exists check",
         },
         {
             "name": "obs_delete_note",
@@ -236,7 +231,7 @@ async def test_error_handling():
             "description": "Non-existent tool",
         },
         {
-            "name": "obs_search_notes",
+            "name": "obs_keyword_search",
             "args": {"invalid_param": "test"},
             "description": "Invalid parameters",
         },
@@ -292,17 +287,18 @@ async def test_prefix_routing():
     print("\n🔀 Testing prefix routing...")
 
     try:
-        # Test valid obs_ prefix
+        # Test valid obs_ alias
         response = await mcp_handler.handle_request(
-            "tools/call", {"name": "obs_search_notes", "arguments": {"query": "test"}}
+            "tools/call",
+            {"name": "obs_keyword_search", "arguments": {"keyword": "test"}},
         )
 
         content = response.get("content", [])
         if content:
-            print("   ✅ obs_ prefix routing works")
+            print("   ✅ obs_ alias routing works")
             obs_routing = True
         else:
-            print("   ❌ obs_ prefix routing failed")
+            print("   ❌ obs_ alias routing failed")
             obs_routing = False
 
         # Test invalid prefix
@@ -311,8 +307,8 @@ async def test_prefix_routing():
         )
 
         content = response.get("content", [])
-        if content and "Unknown tool prefix" in content[0].get("text", ""):
-            print("   ✅ Invalid prefix properly rejected")
+        if content and "Unknown tool" in content[0].get("text", ""):
+            print("   ✅ Invalid tool name properly rejected")
             invalid_routing = True
         else:
             print("   ❌ Invalid prefix not properly handled")

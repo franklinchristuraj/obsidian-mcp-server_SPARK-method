@@ -178,12 +178,14 @@ class MCPProtocolHandler:
                 ]
             }
 
-        # Route to appropriate service based on prefix
-        if tool_name.startswith("obs_"):
-            # Execute Obsidian tools
-            try:
-                from .tools.obsidian_tools import obsidian_tools
+        try:
+            from .tools.obsidian_tools import OBSIDIAN_ROUTED_TOOL_NAMES, obsidian_tools
+        except Exception:
+            OBSIDIAN_ROUTED_TOOL_NAMES = frozenset()
+            obsidian_tools = None  # type: ignore
 
+        if tool_name in OBSIDIAN_ROUTED_TOOL_NAMES and obsidian_tools is not None:
+            try:
                 return await obsidian_tools.execute_tool(tool_name, arguments)
             except Exception as e:
                 return {
@@ -194,27 +196,15 @@ class MCPProtocolHandler:
                         }
                     ]
                 }
-        # Future application routing can be added here following the same pattern
-        # elif tool_name.startswith("notion_"):
-        #     try:
-        #         from .tools.notion_tools import notion_tools
-        #         return await notion_tools.execute_tool(tool_name, arguments)
-        #     except Exception as e:
-        #         return {
-        #             "content": [
-        #                 {"type": "text", "text": f"❌ Notion tool '{tool_name}' failed: {str(e)}"}
-        #             ]
-        #         }
-        else:
-            # Unknown tool prefix
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"❌ Unknown tool prefix for '{tool_name}'. Expected 'obs_' prefix or other registered application prefixes.",
-                    }
-                ]
-            }
+        # Future application routing (e.g. notion_) can be added here
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"❌ Unknown tool '{tool_name}'.",
+                }
+            ]
+        }
 
     async def _handle_resources_list(
         self, params: Optional[Dict[str, Any]]
