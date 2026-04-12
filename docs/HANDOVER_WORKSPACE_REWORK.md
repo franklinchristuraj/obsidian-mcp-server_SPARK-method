@@ -102,34 +102,49 @@ After editing keys, restart the server (config is loaded once per process unless
 
 ---
 
-## 6. Claude skill configuration
+## 6. MCP prompts & resources (agent context)
+
+**Canonical agent summary:** MCP prompt **`vault_mcp_agent_guide`** ([`src/prompts/obsidian_prompts.py`](../src/prompts/obsidian_prompts.py)) — workspaces, tool-selection table, `scope` / path rules, removed tools, and **resources vs tools** (resources are **not** API-key scope filtered).
+
+**Other prompts** (`note_template_system`, daily/project/area templates, `format_preservation_rules`) now state that MCP paths are **workspace-relative** and point to `vault_mcp_agent_guide` where needed.
+
+**Resources** ([`src/resources/obsidian_resources.py`](../src/resources/obsidian_resources.py)): descriptions tag **`Workspace \`personal\``** (etc.) when paths live under a known scope; vault root description warns restricted keys to prefer **tools** with **`scope`**.
+
+**Server metadata** ([`src/mcp_server.py`](../src/mcp_server.py) `serverInfo.description`): mentions workspace-scoped tools and the prompt name for discovery.
+
+**Maintenance rule:** When tool names or scope behavior change, update **`vault_mcp_agent_guide`** first, then skim template prompts for stale path wording.
+
+---
+
+## 7. Claude skill configuration
 
 Skill **content** (Phase 3 in the design) is **not** stored in this repository by default. The design specifies **two** skills; implement them in your Cursor/Claude skill packs or internal repo:
 
 1. **`franklin-obsidian-vault`** — Personal Claude: describes **all three** workspaces, **`scope`** usage, new tool names, routing rules (when to use `personal` vs `passion` vs `work`). See design § “Skill 1”.
 2. **`franklin-work-vault`** — Work-only Claude: **only `work`**, no mention of other workspaces. See design § “Skill 2”.
 
-### 6.1 What skills must teach the model
+### 7.1 What skills must teach the model
 
 - Call **`workspaces`** once per session (or when unsure) to see allowed scopes for **this** connector.
 - Use **canonical tool names** (`search`, `read_note`, …); aliases still work if old prompts reference `obs_*`.
 - **Never** put `personal/`, `passion/`, or `work/` as the first segment of `path`; use **`scope`**.
 - For **multi-scope** keys, always pass **`scope`** on **writes**.
 - On reads, **omit `scope`** to search/list across allowed workspaces, or set **`scope`** to narrow.
+- Keep skill prose aligned with MCP prompt **`vault_mcp_agent_guide`**, or tell the model to fetch it with `prompts/get`.
 
-### 6.2 Claude.ai (remote MCP / OAuth)
+### 7.2 Claude.ai (remote MCP / OAuth)
 
 - Connector URL: your public MCP base, e.g. `https://<your-domain>/mcp`.
 - Claude uses OAuth against this server’s documented endpoints (`/.well-known/...`, `/authorize`, `/token`, etc.).
 - **Important:** register each OAuth **`client_id`** under **`oauth_clients`** in `workspace_keys.json` with the right **`scopes`** (or rely on `MCP_DEFAULT_WORKSPACE_SCOPES` until configured).
 
-### 6.3 Claude Desktop — remote connector
+### 7.3 Claude Desktop — remote connector
 
 Same URL as Claude.ai where the product supports custom remote MCP. Ensure **Authorization** (Bearer) or proxy-injected key matches a row in **`keys`** or **`MCP_API_KEY`** behavior above.
 
 Legacy doc (tool count and names are **out of date** but transport still valid): [`docs/claude/CLAUDE_REMOTE_CONNECTOR_SETUP.md`](claude/CLAUDE_REMOTE_CONNECTOR_SETUP.md).
 
-### 6.4 Claude Desktop — stdio bridge
+### 7.4 Claude Desktop — stdio bridge
 
 Bridge script: [`scripts/mcp_stdio_bridge.py`](../scripts/mcp_stdio_bridge.py). It forwards JSON-RPC to **`MCP_SERVER_URL`** and sends **`MCP_API_KEY`** as Bearer.
 
@@ -154,13 +169,13 @@ Use a key whose **`keys`** entry in `workspace_keys.json` matches the intended *
 
 Detailed stdio steps: [`docs/claude/CLAUDE_DESKTOP_STDIO_SETUP.md`](claude/CLAUDE_DESKTOP_STDIO_SETUP.md) (update tool counts/names mentally to match §5 above).
 
-### 6.5 Cursor / other “skills”
+### 7.5 Cursor / other “skills”
 
 If you use Cursor **Rules** or **Agent Skills** (`SKILL.md`), mirror the same guidance: workspace model, **`scope`**, canonical tool names, and pointer to **`workspaces`**. Keep **work** and **personal** connectors on **separate** API keys with different `scopes` in `workspace_keys.json`.
 
 ---
 
-## 7. Verification performed in development
+## 8. Verification performed in development
 
 - **`pytest`** — full suite green (30 tests) in CI/dev venv.
 - **`verify_tools.py`** — registration, schemas, `tools/list` (22 tools), ping, unknown tool handling.
@@ -180,7 +195,7 @@ Confirm returned scopes match that key’s row in `workspace_keys.json`.
 
 ---
 
-## 8. Follow-ups (optional)
+## 9. Follow-ups (optional)
 
 - Phase 1 vault cleanup (root `00_system/`, etc.) — operational, not in this repo.
 - Phase 3 — author/replace the two **SKILL.md** packs and reference files listed in the design.

@@ -1,6 +1,10 @@
 """
 Obsidian Resources Implementation for MCP Protocol
-Handles browseable vault structure via obsidian://notes/{path} URI patterns
+Handles browseable vault structure via obsidian://notes/{path} URI patterns.
+
+URIs use full vault-relative paths (often starting with personal/, passion/, or work/).
+MCP tools enforce API-key workspace scope; resources/list and resources/read do not—
+prefer tools when the connection is scope-restricted.
 """
 import asyncio
 import urllib.parse
@@ -9,6 +13,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from ..types import MCPResource
 from ..clients.obsidian_client import ObsidianClient, ObsidianAPIError
+from ..scope import KNOWN_SCOPES
 
 
 @dataclass
@@ -87,6 +92,27 @@ class ObsidianResources:
         encoded_path = urllib.parse.quote(path, safe="/")
         return f"{self.uri_scheme}://{self.uri_authority}/{encoded_path}"
 
+    def _workspace_prefix(self, path: str) -> Optional[str]:
+        """First path segment if it is a known workspace folder name."""
+        if not path or path in ("/", ""):
+            return None
+        first = path.strip("/").split("/")[0]
+        return first if first in KNOWN_SCOPES else None
+
+    def _folder_description(self, folder_path: str, name: str, notes_count: int, subfolders: int) -> str:
+        ws = self._workspace_prefix(folder_path.strip("/"))
+        base = f"{notes_count} notes, {subfolders} subfolders"
+        if ws:
+            return f"Workspace `{ws}` · {base}"
+        return f"Folder `{name}` · {base}"
+
+    def _note_description(self, path: str, size: int, modified: datetime) -> str:
+        ws = self._workspace_prefix(path)
+        when = modified.strftime("%Y-%m-%d")
+        if ws:
+            return f"Workspace `{ws}` · {size} bytes · modified {when}"
+        return f"Note · {size} bytes · modified {when}"
+
     def is_folder_path(self, path: str) -> bool:
         """
         Determine if path represents a folder (ends with / or has no extension)
@@ -117,13 +143,20 @@ class ObsidianResources:
                 MCPResource(
                     uri=f"{self.uri_scheme}://{self.uri_authority}/",
                     name="Vault Root",
-                    description="Browse all notes and folders in the vault",
+                    description=(
+                        "Top-level vault browse. Expect workspace roots: personal/, passion/, work/. "
+                        "Resources are not API-key scope filtered—use list_notes/read_note/search "
+                        "with scope when the key is restricted."
+                    ),
                     mimeType="application/json",
                 )
             )
 
-            # Get vault structure
-            vault_structure = await self.client.get_vault_structure(use_cache=True)
+            # Full structure including note metadata so resources/list exposes per-file URIs.
+            # Cost: filesystem scan; large vaults may return many resources.
+            vault_structure = await self.client.get_vault_structure(
+                use_cache=True, include_notes=True
+            )
 
             # Add folder resources
             for folder in vault_structure.folders:
@@ -132,7 +165,12 @@ class ObsidianResources:
                     MCPResource(
                         uri=self.build_uri(folder_path),
                         name=folder.name,
-                        description=f"Folder with {folder.notes_count} notes and {folder.subfolders_count} subfolders",
+                        description=self._folder_description(
+                            folder.path,
+                            folder.name,
+                            folder.notes_count,
+                            folder.subfolders_count,
+                        ),
                         mimeType="application/json",
                     )
                 )
@@ -143,7 +181,9 @@ class ObsidianResources:
                     MCPResource(
                         uri=self.build_uri(note.path),
                         name=note.name,
-                        description=f"Note ({note.size} bytes, modified {note.modified.strftime('%Y-%m-%d')})",
+                        description=self._note_description(
+                            note.path, note.size, note.modified
+                        ),
                         mimeType="text/markdown",
                     )
                 )
@@ -156,7 +196,10 @@ class ObsidianResources:
                     MCPResource(
                         uri=f"{self.uri_scheme}://{self.uri_authority}/",
                         name="Vault Root",
-                        description="Vault access (limited due to connection issues)",
+                        description=(
+                            "Vault access (limited). Resources are not scope-filtered; "
+                            "prefer MCP tools with scope when restricted."
+                        ),
                         mimeType="application/json",
                     )
                 )

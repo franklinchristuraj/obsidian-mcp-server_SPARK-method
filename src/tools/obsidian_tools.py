@@ -43,6 +43,34 @@ def _scope_schema_write() -> Dict[str, Any]:
     }
 
 
+# Tool name -> ObsidianTools method name (single source of truth for routing + dispatch)
+OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
+    "workspaces": "tool_workspaces",
+    "vault_structure": "get_vault_structure",
+    "obs_get_vault_structure": "get_vault_structure",
+    "list_notes": "list_notes",
+    "obs_list_notes": "list_notes",
+    "list_journal": "list_journal",
+    "obs_list_daily_notes": "list_journal",
+    "search": "keyword_search",
+    "obs_keyword_search": "keyword_search",
+    "read_note": "read_note",
+    "obs_read_note": "read_note",
+    "create_note": "create_note",
+    "obs_create_note": "create_note",
+    "update_note": "update_note",
+    "obs_update_note": "update_note",
+    "append_note": "append_note",
+    "obs_append_note": "append_note",
+    "note_exists": "check_note_exists",
+    "obs_check_note_exists": "check_note_exists",
+    "delete_note": "delete_note",
+    "obs_delete_note": "delete_note",
+}
+
+OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
+
+
 class ObsidianTools:
     """Workspace-scoped Obsidian MCP tools."""
 
@@ -220,7 +248,10 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         tools: List[MCPTool] = [
             _tool(
                 "workspaces",
-                "List workspace folders (scopes) allowed for the current API key.",
+                (
+                    "List workspace folders (scopes) allowed for this API key. "
+                    "Call early in a session; see MCP prompt vault_mcp_agent_guide for full tool and path rules."
+                ),
                 {},
                 [],
             ),
@@ -1341,34 +1372,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Dispatch MCP tool call (canonical names and obs_* aliases)."""
         args = dict(arguments or {})
-        tool_methods = {
-            "workspaces": self.tool_workspaces,
-            "vault_structure": self.get_vault_structure,
-            "obs_get_vault_structure": self.get_vault_structure,
-            "list_notes": self.list_notes,
-            "obs_list_notes": self.list_notes,
-            "list_journal": self.list_journal,
-            "obs_list_daily_notes": self.list_journal,
-            "search": self.keyword_search,
-            "obs_keyword_search": self.keyword_search,
-            "read_note": self.read_note,
-            "obs_read_note": self.read_note,
-            "create_note": self.create_note,
-            "obs_create_note": self.create_note,
-            "update_note": self.update_note,
-            "obs_update_note": self.update_note,
-            "append_note": self.append_note,
-            "obs_append_note": self.append_note,
-            "note_exists": self.check_note_exists,
-            "obs_check_note_exists": self.check_note_exists,
-            "delete_note": self.delete_note,
-            "obs_delete_note": self.delete_note,
-        }
-
-        if tool_name not in tool_methods:
+        handler_name = OBSIDIAN_TOOL_DISPATCH.get(tool_name)
+        if handler_name is None:
             raise ValueError(f"Unknown tool: {tool_name}")
 
-        method = tool_methods[tool_name]
+        method = getattr(self, handler_name)
 
         try:
             return await method(**args)
@@ -1377,32 +1385,6 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         except Exception as e:
             raise ValueError(f"Tool '{tool_name}' failed: {str(e)}")
 
-
-OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(
-    {
-        "workspaces",
-        "vault_structure",
-        "obs_get_vault_structure",
-        "list_notes",
-        "obs_list_notes",
-        "list_journal",
-        "obs_list_daily_notes",
-        "search",
-        "obs_keyword_search",
-        "read_note",
-        "obs_read_note",
-        "create_note",
-        "obs_create_note",
-        "update_note",
-        "obs_update_note",
-        "append_note",
-        "obs_append_note",
-        "note_exists",
-        "obs_check_note_exists",
-        "delete_note",
-        "obs_delete_note",
-    }
-)
 
 # Global instance
 obsidian_tools = ObsidianTools()

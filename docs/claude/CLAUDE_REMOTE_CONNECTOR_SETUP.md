@@ -1,5 +1,7 @@
 # Claude Desktop Remote Connector Setup
 
+> **Note:** This document may list older tool counts and names. For current MCP tools, scopes, and paths, use the **`vault_mcp_agent_guide`** prompt on the server and project handover docs.
+
 ## 🎯 Direct Connection to Remote MCP Server
 
 Your MCP server is working perfectly with **11 tools available**. Here's how to connect Claude Desktop using remote connectors.
