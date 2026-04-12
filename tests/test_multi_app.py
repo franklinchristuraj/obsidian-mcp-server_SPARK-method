@@ -107,8 +107,8 @@ async def test_unknown_prefix():
         content = response.get("content", [])
         if content and content[0].get("text"):
             text = content[0]["text"]
-            if "Unknown tool prefix" in text:
-                print("✅ Unknown prefix handled correctly")
+            if "Unknown tool" in text:
+                print("✅ Unknown tool handled correctly")
                 return True
             else:
                 print(f"❌ Unexpected response: {text}")

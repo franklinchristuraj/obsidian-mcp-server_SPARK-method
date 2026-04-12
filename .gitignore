@@ -43,6 +43,18 @@ config.yaml
 *.pem
 *.crt
 
+# Workspace keys (contain real secrets — never commit)
+workspace_keys.json
+
+# Token database (live SQLite — never commit)
+tokens.db
+
+# Virtual environment
+.venv/
+
+# Diagnostic / temp files
+DIAGNOSTIC.md
+
 # Sensitive documentation
 SETUP_STATUS.md
 REMOTE_ACCESS.md

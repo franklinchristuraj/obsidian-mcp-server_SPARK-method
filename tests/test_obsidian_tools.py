@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def test_mcp_tool(
+def call_mcp_tool(
     base_url: str, headers: dict, tool_name: str, arguments: dict, test_name: str
 ):
-    """Test a specific MCP tool"""
+    """Call a specific MCP tool over HTTP (integration helper)."""
     print(f"\n🔧 Testing {test_name}...")
 
     request_data = {
@@ -83,8 +83,8 @@ def test_mcp_tool(
         return False
 
 
-async def test_obsidian_tools():
-    """Test all Obsidian MCP tools"""
+async def run_obsidian_tools_live():
+    """Exercise Obsidian MCP tools against a running server (manual / script use)."""
 
     # Get configuration
     host = os.getenv("MCP_HOST", "127.0.0.1")
@@ -121,33 +121,33 @@ async def test_obsidian_tools():
     # Test Results Tracking
     results = []
 
-    # Test 2: search_notes
-    success = test_mcp_tool(
+    # Test 2: search (keyword)
+    success = call_mcp_tool(
         base_url,
         headers,
-        "search_notes",
-        {"query": "note", "folder": ""},
-        "search_notes - search for 'note'",
+        "search",
+        {"keyword": "note", "folder": ""},
+        "search - keyword search for 'note'",
     )
-    results.append(("search_notes", success))
+    results.append(("search", success))
 
-    # Test 3: get_vault_structure
-    success = test_mcp_tool(
+    # Test 3: vault_structure
+    success = call_mcp_tool(
         base_url,
         headers,
-        "get_vault_structure",
+        "vault_structure",
         {"use_cache": True},
-        "get_vault_structure - get complete vault structure",
+        "vault_structure - folder tree",
     )
-    results.append(("get_vault_structure", success))
+    results.append(("vault_structure", success))
 
     # Test 4: list_notes
-    success = test_mcp_tool(
+    success = call_mcp_tool(
         base_url,
         headers,
         "list_notes",
         {"folder": ""},
-        "list_notes - list all notes with metadata",
+        "list_notes - list notes with metadata",
     )
     results.append(("list_notes", success))
 
@@ -167,7 +167,7 @@ This note was created to test the MCP tools integration.
 #mcp #test #automation
 """
 
-    success = test_mcp_tool(
+    success = call_mcp_tool(
         base_url,
         headers,
         "create_note",
@@ -178,7 +178,7 @@ This note was created to test the MCP tools integration.
 
     if success:
         # Test 6: Read the created note
-        success = test_mcp_tool(
+        success = call_mcp_tool(
             base_url,
             headers,
             "read_note",
@@ -192,7 +192,7 @@ This note was created to test the MCP tools integration.
             test_content
             + f"\n\n## Updated Section\nUpdated at: {datetime.now().isoformat()}"
         )
-        success = test_mcp_tool(
+        success = call_mcp_tool(
             base_url,
             headers,
             "update_note",
@@ -205,7 +205,7 @@ This note was created to test the MCP tools integration.
         append_content = (
             f"\n## Appended Section\nAppended at: {datetime.now().isoformat()}"
         )
-        success = test_mcp_tool(
+        success = call_mcp_tool(
             base_url,
             headers,
             "append_note",
@@ -215,17 +215,17 @@ This note was created to test the MCP tools integration.
         results.append(("append_note", success))
 
         # Test 9: Search for our test note
-        success = test_mcp_tool(
+        success = call_mcp_tool(
             base_url,
             headers,
-            "search_notes",
-            {"query": "MCP Test Note", "folder": ""},
-            "search_notes - find our test note",
+            "search",
+            {"keyword": "MCP Test Note", "folder": ""},
+            "search - find our test note",
         )
-        results.append(("search_notes (specific)", success))
+        results.append(("search (specific)", success))
 
         # Test 10: Delete the test note
-        success = test_mcp_tool(
+        success = call_mcp_tool(
             base_url,
             headers,
             "delete_note",
@@ -235,16 +235,6 @@ This note was created to test the MCP tools integration.
         results.append(("delete_note", success))
     else:
         print("   ⚠️  Skipping read/update/append/delete tests due to create failure")
-
-    # Test 11: Execute command (this might fail if Obsidian isn't connected)
-    success = test_mcp_tool(
-        base_url,
-        headers,
-        "execute_command",
-        {"command": "app:reload", "parameters": {}},
-        "execute_command - reload Obsidian (may fail if not connected)",
-    )
-    results.append(("execute_command", success))
 
     # Test Summary
     print("\n" + "=" * 70)
@@ -280,6 +270,6 @@ This note was created to test the MCP tools integration.
 if __name__ == "__main__":
     import asyncio
 
-    asyncio.run(test_obsidian_tools())
+    asyncio.run(run_obsidian_tools_live())
 
 

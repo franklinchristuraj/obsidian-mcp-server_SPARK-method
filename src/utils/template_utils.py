@@ -110,13 +110,20 @@ class TemplateDetector:
                 return note_type
         return None
 
-    def get_template_path_for_folder(self, path: str) -> Optional[str]:
-        """Get vault template file path for a given note path"""
-        # Normalize the path first to handle aliases
+    def get_template_path_for_folder(
+        self, path: str, workspace_scope: Optional[str] = None
+    ) -> Optional[str]:
+        """Vault-relative template path; prefixed with workspace folder when provided."""
         normalized_path = self.normalize_folder_path(path)
 
         for folder, template_path in self.vault_templates.items():
-            if normalized_path.startswith(folder + "/") or normalized_path.startswith(folder):
+            if normalized_path.startswith(folder + "/") or normalized_path.startswith(
+                folder
+            ):
+                if workspace_scope:
+                    ws = workspace_scope.strip().strip("/")
+                    if ws:
+                        return f"{ws}/{template_path}"
                 return template_path
         return None
 

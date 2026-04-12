@@ -9,13 +9,17 @@ import os
 import json
 import asyncio
 import time
-import hashlib
 from typing import Dict, Any, Optional, AsyncGenerator
 from src.auth import verify_api_key
+from src.scope import workspace_ctx
 from src.mcp_server import mcp_handler, MCPProtocolHandler
+from src.token_store import TokenStore, generate_token, verify_pkce
 
 # Load environment variables
 load_dotenv()
+
+# Token store (initialized at startup)
+token_store = TokenStore(db_path=os.getenv("TOKEN_DB_PATH", "tokens.db"))
 
 # Create FastAPI app
 app = FastAPI(
@@ -25,9 +29,123 @@ app = FastAPI(
 )
 
 
+@app.on_event("startup")
+async def startup():
+    await token_store.init_db()
+    asyncio.create_task(_periodic_cleanup())
+
+
+async def _periodic_cleanup():
+    """Delete expired tokens every hour."""
+    while True:
+        await asyncio.sleep(3600)
+        await token_store.cleanup_expired()
+
+
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
+
+@app.exception_handler(FastAPIHTTPException)
+async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    """
+    Override FastAPI's default HTTPException handler so that 401 responses
+    include the WWW-Authenticate header required for MCP OAuth discovery.
+    """
+    if exc.status_code == 401:
+        base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
+        resource_metadata_url = f"{base_url}/.well-known/oauth-protected-resource"
+        return JSONResponse(
+            status_code=401,
+            content={"detail": exc.detail if hasattr(exc, "detail") else "Unauthorized"},
+            headers={
+                "WWW-Authenticate": f'Bearer resource_metadata="{resource_metadata_url}"',
+            },
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "obsidian-mcp-server"}
+
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_server_metadata():
+    """OAuth 2.0 Authorization Server Metadata (RFC 8414). Required for MCP discovery."""
+    base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
+    return {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/authorize",
+        "token_endpoint": f"{base_url}/token",
+        "registration_endpoint": f"{base_url}/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "token_endpoint_auth_methods_supported": ["none"],
+    }
+
+
+@app.get("/.well-known/oauth-protected-resource")
+async def oauth_protected_resource_metadata():
+    """OAuth 2.0 Protected Resource Metadata (RFC 9728). Required for MCP discovery."""
+    base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
+    return {
+        "resource": f"{base_url}/mcp",
+        "authorization_servers": [base_url],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header"],
+    }
+
+
+@app.post("/register")
+async def oauth_register(request: Request):
+    """
+    OAuth 2.0 Dynamic Client Registration (RFC 7591).
+    Claude.ai POSTs here to register itself as an OAuth client before starting the auth flow.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            content={"error": "invalid_request", "error_description": "Request body must be JSON"},
+            status_code=400,
+        )
+
+    client_name = body.get("client_name", "Unknown MCP Client")
+    redirect_uris = body.get("redirect_uris", [])
+    grant_types = body.get("grant_types", ["authorization_code", "refresh_token"])
+    response_types = body.get("response_types", ["code"])
+    token_endpoint_auth_method = body.get("token_endpoint_auth_method", "none")
+
+    if not redirect_uris or not isinstance(redirect_uris, list):
+        return JSONResponse(
+            content={"error": "invalid_request", "error_description": "redirect_uris is required and must be a non-empty array"},
+            status_code=400,
+        )
+
+    client = await token_store.register_client(
+        client_name=client_name,
+        redirect_uris=redirect_uris,
+        grant_types=grant_types,
+        response_types=response_types,
+        token_endpoint_auth_method=token_endpoint_auth_method,
+    )
+
+    print(f"📝 DCR: Registered client '{client_name}' -> {client['client_id'][:20]}... redirect_uris={redirect_uris}")
+
+    return JSONResponse(
+        content={
+            "client_id": client["client_id"],
+            "client_name": client["client_name"],
+            "redirect_uris": client["redirect_uris"],
+            "grant_types": client["grant_types"],
+            "response_types": client["response_types"],
+            "token_endpoint_auth_method": client["token_endpoint_auth_method"],
+        },
+        status_code=201,
+    )
 
 
 @app.get("/authorize")
@@ -42,118 +160,158 @@ async def oauth_authorize(
     scope: str = None,
 ):
     """
-    OAuth 2.0 Authorization endpoint for Claude.ai connectors
-    Implements simplified OAuth flow that returns authorization code
+    OAuth 2.0 Authorization endpoint (Authorization Code flow with PKCE).
+    Generates a stored, single-use authorization code.
     """
     from urllib.parse import unquote
-    
-    # Decode URL-encoded client_id (Claude.ai sends "Obsidian+MCP+Server" URL-encoded)
+
+    if response_type != "code":
+        return JSONResponse(
+            content={"error": "unsupported_response_type", "error_description": "Only response_type=code is supported"},
+            status_code=400,
+        )
+
+    # Decode URL-encoded client_id (Claude.ai may send "Obsidian+MCP+Server")
     if client_id:
         client_id = unquote(client_id)
-    
-    expected_key = os.getenv("MCP_API_KEY")
-    
-    # Claude.ai sends the connector name as client_id, not the API key
-    # We'll accept any client_id and generate a code, then verify in token endpoint
-    # For simplified flow, accept any client_id and generate authorization code
-    if client_id:
-        # Generate authorization code
-        code_data = f"{client_id}:{time.time()}:{code_challenge or ''}"
-        auth_code = hashlib.sha256(code_data.encode()).hexdigest()[:32]
-        
-        # Store code temporarily (in production, use Redis or database)
-        # For now, accept any code in token endpoint if client_id matches
-        
-        # Redirect back to Claude.ai with authorization code
-        if redirect_uri:
-            redirect_url = f"{redirect_uri}?code={auth_code}&state={state or ''}"
-            return Response(status_code=302, headers={"Location": redirect_url})
-        else:
-            return {"code": auth_code, "state": state}
-    
-    # Return error if no client_id
-    return JSONResponse(
-        content={"error": "invalid_request", "error_description": "Missing client_id"},
-        status_code=400,
+
+    if not client_id:
+        return JSONResponse(
+            content={"error": "invalid_request", "error_description": "Missing client_id"},
+            status_code=400,
+        )
+
+    # Validate that the client_id is registered (via DCR) or accept it as-is for flexibility
+    registered_client = await token_store.get_client(client_id)
+    if registered_client and redirect_uri:
+        if redirect_uri not in registered_client["redirect_uris"]:
+            return JSONResponse(
+                content={"error": "invalid_request", "error_description": "redirect_uri does not match registered URIs"},
+                status_code=400,
+            )
+
+    print(f"🔑 AUTHORIZE: client_id={client_id[:20]}... redirect_uri={redirect_uri} registered={'yes' if registered_client else 'no'}")
+
+    # Generate and store a cryptographically random auth code
+    auth_code = generate_token()
+    await token_store.store_auth_code(
+        code=auth_code,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        code_challenge=code_challenge,
+        scope=scope,
     )
+
+    if redirect_uri:
+        from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
+        params = {"code": auth_code}
+        if state:
+            params["state"] = state
+        # Use standard HTTP 302 redirect — this is what OAuth clients expect
+        separator = "&" if "?" in redirect_uri else "?"
+        redirect_url = f"{redirect_uri}{separator}{urlencode(params)}"
+        from fastapi.responses import RedirectResponse
+        print(f"↩️  REDIRECT: {redirect_url[:100]}...")
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    return {"code": auth_code, "state": state}
 
 
 @app.post("/token")
-async def oauth_token(
-    request: Request,
-    grant_type: str = None,
-    code: str = None,
-    redirect_uri: str = None,
-    client_id: str = None,
-    code_verifier: str = None,
-    scope: str = None,
-):
+async def oauth_token(request: Request):
     """
-    OAuth 2.0 Token endpoint for Claude.ai connectors
-    Exchanges authorization code for access token
+    OAuth 2.0 Token endpoint.
+    Supports grant_type: authorization_code, refresh_token.
     """
-    from fastapi import Form
-    
-    # Parse form data if Content-Type is application/x-www-form-urlencoded
-    content_type = request.headers.get("content-type", "")
-    if "application/x-www-form-urlencoded" in content_type:
-        form_data = await request.form()
-        grant_type = form_data.get("grant_type") or grant_type
-        code = form_data.get("code") or code
-        redirect_uri = form_data.get("redirect_uri") or redirect_uri
-        client_id = form_data.get("client_id") or client_id
-        code_verifier = form_data.get("code_verifier") or code_verifier
-        scope = form_data.get("scope") or scope
-    
     from urllib.parse import unquote
-    
-    # Decode URL-encoded client_id if needed
+
+    # Always parse as form data (OAuth spec requires application/x-www-form-urlencoded)
+    form_data = await request.form()
+    grant_type = form_data.get("grant_type")
+    code = form_data.get("code")
+    redirect_uri = form_data.get("redirect_uri")
+    client_id = form_data.get("client_id")
+    code_verifier = form_data.get("code_verifier")
+    refresh_token = form_data.get("refresh_token")
+    scope = form_data.get("scope")
+
     if client_id:
-        client_id = unquote(client_id)
-    
-    expected_key = os.getenv("MCP_API_KEY")
-    
-    # Simplified OAuth: If grant_type is authorization_code, return access token
+        client_id = unquote(str(client_id))
+
+    # ------------------------------------------------------------------
+    # Grant: authorization_code
+    # ------------------------------------------------------------------
     if grant_type == "authorization_code":
-        # For simplified flow, accept any valid code and return API key as access token
-        # In production, verify code against stored codes
-        if code and client_id:
-            # Return access token (use API key as token)
-            # Claude.ai will use this as Bearer token for subsequent requests
-            access_token = expected_key
-            return {
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": 3600,
-                "scope": scope or "claudeai",
-            }
-        else:
+        if not code or not client_id:
             return JSONResponse(
                 content={"error": "invalid_request", "error_description": "Missing code or client_id"},
                 status_code=400,
             )
-    
-    # Client credentials grant (for direct API access)
-    elif grant_type == "client_credentials":
-        # If client_id is the API key, return it as access token
-        if client_id == expected_key or (client_id and len(client_id) == 64):
-            access_token = expected_key
-            return {
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": 3600,
-            }
-        # If client_id is connector name, use API key as token
-        elif client_id:
-            access_token = expected_key
-            return {
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": 3600,
-            }
-    
+
+        code_data = await token_store.get_auth_code(str(code))
+        if code_data is None:
+            return JSONResponse(
+                content={"error": "invalid_grant", "error_description": "Authorization code invalid or expired"},
+                status_code=400,
+            )
+
+        # PKCE verification (S256 or plain)
+        if code_data.get("code_challenge") and code_verifier:
+            if not verify_pkce(code_data["code_challenge"], str(code_verifier)):
+                return JSONResponse(
+                    content={"error": "invalid_grant", "error_description": "PKCE verification failed"},
+                    status_code=400,
+                )
+
+        # Consume the code (single-use)
+        await token_store.delete_auth_code(str(code))
+
+        access_token = generate_token()
+        new_refresh = generate_token()
+        effective_scope = scope or code_data.get("scope") or "mcp"
+        await token_store.store_tokens(
+            access_token=access_token,
+            refresh_token=new_refresh,
+            client_id=code_data["client_id"],
+            scope=effective_scope,
+        )
+
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": new_refresh,
+            "scope": effective_scope,
+        }
+
+    # ------------------------------------------------------------------
+    # Grant: refresh_token  ← THIS is what fixes mobile persistence
+    # ------------------------------------------------------------------
+    elif grant_type == "refresh_token":
+        if not refresh_token:
+            return JSONResponse(
+                content={"error": "invalid_request", "error_description": "Missing refresh_token"},
+                status_code=400,
+            )
+
+        try:
+            new_access, new_refresh = await token_store.rotate_refresh_token(str(refresh_token))
+        except ValueError:
+            return JSONResponse(
+                content={"error": "invalid_grant", "error_description": "Refresh token invalid or expired"},
+                status_code=400,
+            )
+
+        return {
+            "access_token": new_access,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": new_refresh,
+            "scope": scope or "mcp",
+        }
+
     return JSONResponse(
-        content={"error": "unsupported_grant_type", "error_description": f"Grant type {grant_type} not supported"},
+        content={"error": "unsupported_grant_type", "error_description": f"Grant type '{grant_type}' not supported"},
         status_code=400,
     )
 
@@ -168,6 +326,8 @@ async def root():
             "health": "/health",
             "oauth_authorize": "/authorize",
             "oauth_token": "/token",
+            "oauth_discovery": "/.well-known/oauth-authorization-server",
+            "resource_metadata": "/.well-known/oauth-protected-resource",
         },
     }
 
@@ -270,8 +430,34 @@ async def debug_endpoint():
     }
 
 
+@app.get("/mcp")
+async def mcp_sse_endpoint(request: Request, _auth=Depends(verify_api_key)):
+    """
+    MCP Streamable HTTP GET endpoint (SSE channel).
+    Required by the MCP spec for server-to-client event streaming.
+    Keeps the connection open and sends a heartbeat so the client knows it's alive.
+    """
+    async def event_stream():
+        # Send an initial endpoint event so Claude.ai knows the SSE channel is up
+        yield "event: endpoint\ndata: /mcp\n\n"
+        # Keep-alive heartbeats every 15 seconds
+        while True:
+            await asyncio.sleep(15)
+            yield ": keepalive\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 @app.post("/mcp")
-async def mcp_endpoint(request: Request, api_key: str = Depends(verify_api_key)):
+async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
     """
     MCP Streamable HTTP endpoint with SSE support
     Accepts JSON-RPC 2.0 requests and returns appropriate responses
@@ -305,8 +491,9 @@ async def mcp_endpoint(request: Request, api_key: str = Depends(verify_api_key))
         accept_header = request.headers.get("accept", "")
         wants_streaming = "text/event-stream" in accept_header
 
+        ctx_token = workspace_ctx.set(auth)
         try:
-            # Use the new MCP protocol handler
+            # Use the new MCP protocol handler (tools read workspace_ctx)
             result = await mcp_handler.handle_request(method, params)
 
             # Handle notifications (which return None and should not send a response)
@@ -347,6 +534,8 @@ async def mcp_endpoint(request: Request, api_key: str = Depends(verify_api_key))
                 content=create_jsonrpc_error("INTERNAL_ERROR", str(e), request_id),
                 status_code=500,
             )
+        finally:
+            workspace_ctx.reset(ctx_token)
 
     except Exception as e:
         # Catch-all for unexpected errors

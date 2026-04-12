@@ -31,7 +31,6 @@ async def validate_tool_discovery():
         obs_tools = [t for t in tools if t["name"].startswith("obs_")]
 
         expected_tools = [
-            "obs_search_notes",
             "obs_read_note",
             "obs_create_note",
             "obs_update_note",
@@ -39,7 +38,6 @@ async def validate_tool_discovery():
             "obs_delete_note",
             "obs_list_notes",
             "obs_get_vault_structure",
-            "obs_execute_command",
             "obs_keyword_search",
             "obs_check_note_exists",
             "obs_list_daily_notes",
