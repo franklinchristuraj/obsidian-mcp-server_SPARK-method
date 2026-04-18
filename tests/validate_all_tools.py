@@ -27,27 +27,31 @@ async def validate_tool_discovery():
         response = await mcp_handler.handle_request("tools/list")
         tools = response.get("tools", [])
 
-        # Filter Obsidian tools
-        obs_tools = [t for t in tools if t["name"].startswith("obs_")]
+        names = [t["name"] for t in tools]
+        legacy = [n for n in names if n.startswith("obs_")]
+        if legacy:
+            print(f"  ❌ Legacy obs_* tools still listed: {legacy}")
+            return False
 
         expected_tools = [
-            "obs_read_note",
-            "obs_create_note",
-            "obs_update_note",
-            "obs_append_note",
-            "obs_delete_note",
-            "obs_list_notes",
-            "obs_get_vault_structure",
-            "obs_keyword_search",
-            "obs_check_note_exists",
-            "obs_list_daily_notes",
+            "workspaces",
+            "vault_structure",
+            "list_notes",
+            "list_journal",
+            "search",
+            "read_note",
+            "create_note",
+            "update_note",
+            "append_note",
+            "note_exists",
+            "delete_note",
         ]
 
-        print(f"Found {len(obs_tools)} Obsidian tools:")
+        print(f"Checking {len(expected_tools)} canonical Obsidian tools (+ ping):")
 
         all_found = True
         for expected in expected_tools:
-            if expected in [t["name"] for t in obs_tools]:
+            if expected in names:
                 print(f"  ✅ {expected}")
             else:
                 print(f"  ❌ {expected} - MISSING")
@@ -56,9 +60,8 @@ async def validate_tool_discovery():
         if all_found:
             print("\n✅ All tools discovered successfully!")
             return True
-        else:
-            print("\n❌ Some tools are missing!")
-            return False
+        print("\n❌ Some tools are missing!")
+        return False
 
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -75,7 +78,7 @@ async def validate_list_notes():
 
     try:
         # Test without tags (optimized path)
-        print("\n📝 Testing obs_list_notes (optimized - no tags)...")
+        print("\n📝 Testing list_notes (optimized - no tags)...")
         result = await obsidian_tools.list_notes(folder="")
 
         metadata = result.get("metadata", {})
@@ -106,7 +109,7 @@ async def validate_get_vault_structure():
     print("="*80)
 
     try:
-        print("\n📝 Testing obs_get_vault_structure (with cache)...")
+        print("\n📝 Testing vault_structure (with cache)...")
         result = await obsidian_tools.get_vault_structure(use_cache=True)
 
         metadata = result.get("metadata", {})
@@ -138,7 +141,7 @@ async def validate_keyword_search():
     print("="*80)
 
     try:
-        print("\n📝 Testing obs_keyword_search (batched concurrent)...")
+        print("\n📝 Testing search / keyword_search (batched concurrent)...")
         result = await obsidian_tools.keyword_search(
             keyword="note",
             folder="",
@@ -181,7 +184,7 @@ async def validate_check_note_exists():
 
         if notes:
             test_path = notes[0]["path"]
-            print(f"\n📝 Testing obs_check_note_exists with: {test_path}")
+            print(f"\n📝 Testing note_exists with: {test_path}")
 
             result = await obsidian_tools.check_note_exists(path=test_path)
 

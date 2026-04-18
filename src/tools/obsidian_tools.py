@@ -20,6 +20,7 @@ from src.scope import (
     strip_scope_prefix,
 )
 from ..types import MCPTool
+from ..utils.list_notes_time import note_mtime_in_window, resolve_list_notes_time_window
 
 
 def _scope_schema_read() -> Dict[str, Any]:
@@ -47,25 +48,15 @@ def _scope_schema_write() -> Dict[str, Any]:
 OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "workspaces": "tool_workspaces",
     "vault_structure": "get_vault_structure",
-    "obs_get_vault_structure": "get_vault_structure",
     "list_notes": "list_notes",
-    "obs_list_notes": "list_notes",
     "list_journal": "list_journal",
-    "obs_list_daily_notes": "list_journal",
     "search": "keyword_search",
-    "obs_keyword_search": "keyword_search",
     "read_note": "read_note",
-    "obs_read_note": "read_note",
     "create_note": "create_note",
-    "obs_create_note": "create_note",
     "update_note": "update_note",
-    "obs_update_note": "update_note",
     "append_note": "append_note",
-    "obs_append_note": "append_note",
     "note_exists": "check_note_exists",
-    "obs_check_note_exists": "check_note_exists",
     "delete_note": "delete_note",
-    "obs_delete_note": "delete_note",
 }
 
 OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
@@ -88,7 +79,7 @@ class ObsidianTools:
             self.client = None
 
     def get_tools(self) -> List[MCPTool]:
-        """Register canonical tool names and obs_* aliases (transition period)."""
+        """Register workspace-scoped Obsidian MCP tools (canonical names only)."""
 
         def _tool(
             name: str, description: str, properties: Dict[str, Any], required: List[str]
@@ -216,6 +207,38 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "default": "",
             },
             "scope": sr,
+            "modified_after": {
+                "type": "string",
+                "description": (
+                    "Optional lower bound on file modification time (inclusive). "
+                    "ISO date YYYY-MM-DD (start of that local day), ISO datetime, or keywords today / yesterday."
+                ),
+            },
+            "modified_before": {
+                "type": "string",
+                "description": (
+                    "Optional upper bound on file modification time (inclusive). "
+                    "For date-only YYYY-MM-DD, includes the entire local calendar day."
+                ),
+            },
+            "days": {
+                "type": "number",
+                "description": (
+                    "Rolling window from now: keep notes modified within the last N days. "
+                    "Combined with modified_after by using the stricter (more recent) cutoff."
+                ),
+            },
+            "hours": {
+                "type": "number",
+                "description": "Rolling window from now: keep notes modified within the last N hours.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Maximum notes to return after filters; results are most recently modified first when "
+                    "any time filter or limit is set."
+                ),
+            },
         }
 
         update_props = {
@@ -262,27 +285,18 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 [],
             ),
             _tool(
-                "obs_get_vault_structure",
-                "Alias of vault_structure.",
-                vault_props,
-                [],
-            ),
-            _tool(
                 "list_notes",
-                "List notes with metadata (scoped).",
+                (
+                    "List notes with metadata (scoped). Optional filters use filesystem mtime: "
+                    "modified_after, modified_before (ISO dates/datetimes or today/yesterday), "
+                    "rolling days/hours, and limit (recent first)."
+                ),
                 list_props,
                 [],
             ),
-            _tool("obs_list_notes", "Alias of list_notes.", list_props, []),
             _tool(
                 "list_journal",
                 "Daily notes in a date range with workspace tags (deduplicated).",
-                journal_props,
-                ["startDate", "endDate"],
-            ),
-            _tool(
-                "obs_list_daily_notes",
-                "Alias of list_journal.",
                 journal_props,
                 ["startDate", "endDate"],
             ),
@@ -293,27 +307,14 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 ["keyword"],
             ),
             _tool(
-                "obs_keyword_search",
-                "Alias of search.",
-                search_props,
-                ["keyword"],
-            ),
-            _tool(
                 "read_note",
                 "Read a note (scoped path).",
                 read_path_prop,
                 ["path"],
             ),
-            _tool("obs_read_note", "Alias of read_note.", read_path_prop, ["path"]),
             _tool(
                 "create_note",
                 "Create a note in a workspace (scope required if key has multiple workspaces).",
-                create_props,
-                ["path", "content"],
-            ),
-            _tool(
-                "obs_create_note",
-                "Alias of create_note.",
                 create_props,
                 ["path", "content"],
             ),
@@ -324,20 +325,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 ["path", "content"],
             ),
             _tool(
-                "obs_update_note",
-                "Alias of update_note.",
-                update_props,
-                ["path", "content"],
-            ),
-            _tool(
                 "append_note",
                 "Append to a note (scope required if key has multiple workspaces).",
-                append_props,
-                ["path", "content"],
-            ),
-            _tool(
-                "obs_append_note",
-                "Alias of append_note.",
                 append_props,
                 ["path", "content"],
             ),
@@ -348,20 +337,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 ["path"],
             ),
             _tool(
-                "obs_check_note_exists",
-                "Alias of note_exists.",
-                read_path_prop,
-                ["path"],
-            ),
-            _tool(
                 "delete_note",
                 "Delete a note (scope required if key has multiple workspaces).",
-                delete_props,
-                ["path"],
-            ),
-            _tool(
-                "obs_delete_note",
-                "Alias of delete_note.",
                 delete_props,
                 ["path"],
             ),
@@ -912,11 +889,21 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             raise ValueError(f"Unexpected error deleting note: {str(e)}")
 
     async def list_notes(
-        self, folder: str = "", scope: Optional[str] = None
+        self,
+        folder: str = "",
+        scope: Optional[str] = None,
+        modified_after: Optional[str] = None,
+        modified_before: Optional[str] = None,
+        days: Optional[float] = None,
+        hours: Optional[float] = None,
+        limit: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """List notes under allowed workspace roots (optional folder + scope)."""
+        """List notes under allowed workspace roots (optional folder, scope, mtime filters)."""
         if not self.client:
             raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be >= 0")
 
         ctx = get_effective_workspace_context()
         allow = tuple(ctx.allowed_scopes)
@@ -929,11 +916,31 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             if folder:
                 forbid_scope_prefix_in_agent_path(folder)
 
+            try:
+                lower, upper = resolve_list_notes_time_window(
+                    modified_after=modified_after,
+                    modified_before=modified_before,
+                    days=days,
+                    hours=hours,
+                )
+            except ValueError as e:
+                raise ValueError(str(e)) from e
+
+            time_or_limit = (
+                lower is not None
+                or upper is not None
+                or days is not None
+                or hours is not None
+                or limit is not None
+            )
+
             notes_data: List[Dict[str, Any]] = []
             for s in active:
                 list_path = scoped_list_folder(folder, s)
                 notes = await self.client.list_notes(list_path, include_tags=False)
                 for note in notes:
+                    if not note_mtime_in_window(note.modified, lower, upper):
+                        continue
                     rel, inferred_scope = strip_scope_prefix(note.path, allow)
                     used_scope = inferred_scope or s
                     note_info = {
@@ -947,9 +954,18 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     }
                     notes_data.append(note_info)
 
+            if time_or_limit:
+                notes_data.sort(key=lambda n: n["modified"], reverse=True)
+            if limit is not None:
+                notes_data = notes_data[:limit]
+
             response_text = f"Found {len(notes_data)} notes"
             if folder:
                 response_text += f" in folder '{folder}'"
+            if lower is not None or upper is not None or days is not None or hours is not None:
+                response_text += " (mtime filter applied)"
+            if limit is not None:
+                response_text += f", limit={limit}"
             response_text += ":\n\n"
             for note_info in notes_data:
                 response_text += f"📝 **{note_info['name']}** [{note_info['scope']}]\n"
@@ -962,12 +978,29 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     response_text += f"   Tags: {', '.join(note_info['tags'])}\n"
                 response_text += "\n"
 
+            meta_filters: Dict[str, Any] = {}
+            if modified_after is not None:
+                meta_filters["modified_after"] = modified_after
+            if modified_before is not None:
+                meta_filters["modified_before"] = modified_before
+            if days is not None:
+                meta_filters["days"] = days
+            if hours is not None:
+                meta_filters["hours"] = hours
+            if lower is not None:
+                meta_filters["effective_modified_after"] = lower.isoformat()
+            if upper is not None:
+                meta_filters["effective_modified_before"] = upper.isoformat()
+            if limit is not None:
+                meta_filters["limit"] = limit
+
             return {
                 "content": [{"type": "text", "text": response_text}],
                 "metadata": {
                     "total_notes": len(notes_data),
                     "folder": folder,
                     "notes": notes_data,
+                    **meta_filters,
                 },
             }
 
@@ -1370,7 +1403,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     async def execute_tool(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Dispatch MCP tool call (canonical names and obs_* aliases)."""
+        """Dispatch MCP tool call by registered tool name."""
         args = dict(arguments or {})
         handler_name = OBSIDIAN_TOOL_DISPATCH.get(tool_name)
         if handler_name is None:
