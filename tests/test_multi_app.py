@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Test script for the multi-application MCP server
-Tests both Obsidian (obs_) and Todoist (todo_) tools
+Test script for the multi-application MCP server (Obsidian tools + ping).
 """
 import asyncio
 import json
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dotenv import load_dotenv
 from src.mcp_server import mcp_handler
 
-# Load environment variables
 load_dotenv()
 
 
@@ -23,18 +25,16 @@ async def test_tool_listing():
 
         print(f"✅ Found {len(tools)} total tools")
 
-        # Count tools by prefix
-        obs_tools = [t for t in tools if t["name"].startswith("obs_")]
-        other_tools = [t for t in tools if not t["name"].startswith("obs_")]
+        legacy = [t["name"] for t in tools if t["name"].startswith("obs_")]
+        if legacy:
+            print(f"❌ Unexpected legacy obs_* tools: {legacy}")
+            return False
 
-        print(f"   📝 Obsidian tools (obs_): {len(obs_tools)}")
-        print(f"   🔧 Other tools: {len(other_tools)}")
+        print(f"   ℹ️  No obs_* alias tools (canonical names only)")
 
-        # List all tools
         print("\n📋 All available tools:")
         for tool in tools:
-            prefix_emoji = "📝" if tool["name"].startswith("obs_") else "🔧"
-            print(f"   {prefix_emoji} {tool['name']}: {tool['description']}")
+            print(f"   🔧 {tool['name']}: {tool['description']}")
 
         return True
 
@@ -67,12 +67,12 @@ async def test_ping():
 
 async def test_obsidian_tool():
     """Test an Obsidian tool (without requiring actual connection)"""
-    print("\n📝 Testing Obsidian tool (obs_get_vault_structure)...")
+    print("\n📝 Testing Obsidian tool (vault_structure)...")
 
     try:
         response = await mcp_handler.handle_request(
             "tools/call",
-            {"name": "obs_get_vault_structure", "arguments": {"use_cache": True}},
+            {"name": "vault_structure", "arguments": {"use_cache": True}},
         )
 
         content = response.get("content", [])

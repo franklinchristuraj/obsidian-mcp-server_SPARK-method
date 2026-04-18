@@ -1,60 +1,61 @@
 #!/usr/bin/env python3
 """
-Comprehensive test script for all Obsidian tools
-Verifies that all obs_ prefixed tools are working correctly after the rollback
+Comprehensive test script for Obsidian MCP tools (canonical names only).
 """
 import asyncio
-import json
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dotenv import load_dotenv
 from src.mcp_server import mcp_handler
 
-# Load environment variables
 load_dotenv()
+
+EXPECTED_OBSIDIAN_TOOLS = frozenset(
+    {
+        "workspaces",
+        "vault_structure",
+        "list_notes",
+        "list_journal",
+        "search",
+        "read_note",
+        "create_note",
+        "update_note",
+        "append_note",
+        "note_exists",
+        "delete_note",
+    }
+)
 
 
 async def test_tool_discovery():
-    """Test that all Obsidian tools are properly discovered"""
+    """Obsidian tools are listed under canonical names; no legacy obs_* aliases."""
     print("🔍 Testing tool discovery...")
 
     try:
         response = await mcp_handler.handle_request("tools/list")
         tools = response.get("tools", [])
+        names = [t["name"] for t in tools]
 
-        # Filter Obsidian tools
-        obs_tools = [t for t in tools if t["name"].startswith("obs_")]
-
-        expected_tools = [
-            "obs_read_note",
-            "obs_create_note",
-            "obs_update_note",
-            "obs_append_note",
-            "obs_delete_note",
-            "obs_list_notes",
-            "obs_get_vault_structure",
-            "obs_keyword_search",
-            "obs_check_note_exists",
-            "obs_list_daily_notes",
-        ]
-
-        print(f"✅ Found {len(obs_tools)} Obsidian tools")
-
-        # Check each expected tool
-        found_tools = [t["name"] for t in obs_tools]
-        missing_tools = []
-
-        for expected in expected_tools:
-            if expected in found_tools:
-                print(f"   ✅ {expected}")
-            else:
-                print(f"   ❌ {expected} - MISSING")
-                missing_tools.append(expected)
-
-        if missing_tools:
-            print(f"❌ Missing tools: {missing_tools}")
+        legacy = [n for n in names if n.startswith("obs_")]
+        if legacy:
+            print(f"❌ Legacy obs_* tools still listed: {legacy}")
             return False
 
-        print(f"✅ All {len(expected_tools)} expected Obsidian tools found")
+        tool_set = set(names)
+        missing = sorted(EXPECTED_OBSIDIAN_TOOLS - tool_set)
+        if missing:
+            print(f"❌ Missing tools: {missing}")
+            return False
+
+        unexpected = sorted(tool_set - EXPECTED_OBSIDIAN_TOOLS - {"ping"})
+        if unexpected:
+            print(f"❌ Unexpected tool names: {unexpected}")
+            return False
+
+        print(f"✅ tools/list: ping + {len(EXPECTED_OBSIDIAN_TOOLS)} Obsidian tools, no obs_* aliases")
         return True
 
     except Exception as e:
@@ -63,20 +64,20 @@ async def test_tool_discovery():
 
 
 async def test_tool_schemas():
-    """Test that all tools have proper schemas"""
+    """All tools (except ping) have descriptions and object inputSchema with properties."""
     print("\n📋 Testing tool schemas...")
 
     try:
         response = await mcp_handler.handle_request("tools/list")
         tools = response.get("tools", [])
-        obs_tools = [t for t in tools if t["name"].startswith("obs_")]
 
         schema_issues = []
 
-        for tool in obs_tools:
+        for tool in tools:
             tool_name = tool["name"]
+            if tool_name == "ping":
+                continue
 
-            # Check required fields
             if not tool.get("description"):
                 schema_issues.append(f"{tool_name}: Missing description")
 
@@ -93,12 +94,12 @@ async def test_tool_schemas():
             print(f"   ✅ {tool_name}: Schema valid")
 
         if schema_issues:
-            print(f"❌ Schema issues found:")
+            print("❌ Schema issues found:")
             for issue in schema_issues:
                 print(f"     - {issue}")
             return False
 
-        print(f"✅ All {len(obs_tools)} tool schemas are valid")
+        print(f"✅ All non-ping tool schemas are valid")
         return True
 
     except Exception as e:
@@ -107,49 +108,54 @@ async def test_tool_schemas():
 
 
 async def test_tool_execution():
-    """Test execution of each Obsidian tool"""
+    """Smoke-test each Obsidian tool via tools/call."""
     print("\n🔧 Testing tool execution...")
 
-    # Test cases for each tool
     test_cases = [
+        {"name": "workspaces", "args": {}, "description": "List allowed scopes"},
         {
-            "name": "obs_keyword_search",
+            "name": "list_journal",
+            "args": {"startDate": "2026-01-01", "endDate": "2026-01-07"},
+            "description": "Daily notes in date range",
+        },
+        {
+            "name": "search",
             "args": {"keyword": "test"},
             "description": "Keyword search",
         },
         {
-            "name": "obs_read_note",
+            "name": "read_note",
             "args": {"path": "nonexistent.md"},
             "description": "Read note (expect error for non-existent file)",
         },
         {
-            "name": "obs_create_note",
+            "name": "create_note",
             "args": {"path": "test-note.md", "content": "Test content"},
             "description": "Create note",
         },
         {
-            "name": "obs_update_note",
+            "name": "update_note",
             "args": {"path": "test-note.md", "content": "Updated content"},
             "description": "Update note",
         },
         {
-            "name": "obs_append_note",
+            "name": "append_note",
             "args": {"path": "test-note.md", "content": "Appended content"},
             "description": "Append to note",
         },
-        {"name": "obs_list_notes", "args": {}, "description": "List notes"},
+        {"name": "list_notes", "args": {}, "description": "List notes"},
         {
-            "name": "obs_get_vault_structure",
+            "name": "vault_structure",
             "args": {"use_cache": True},
             "description": "Get vault structure",
         },
         {
-            "name": "obs_check_note_exists",
+            "name": "note_exists",
             "args": {"path": "nonexistent.md"},
             "description": "Note exists check",
         },
         {
-            "name": "obs_delete_note",
+            "name": "delete_note",
             "args": {"path": "test-note.md"},
             "description": "Delete note",
         },
@@ -169,36 +175,32 @@ async def test_tool_execution():
                 "tools/call", {"name": tool_name, "arguments": args}
             )
 
-            # Check response structure
             if "content" not in response:
-                print(f"     ❌ No 'content' in response")
+                print("     ❌ No 'content' in response")
                 results.append((tool_name, False, "No content in response"))
                 continue
 
             content = response["content"]
             if not isinstance(content, list) or len(content) == 0:
-                print(f"     ❌ Invalid content structure")
+                print("     ❌ Invalid content structure")
                 results.append((tool_name, False, "Invalid content structure"))
                 continue
 
             first_content = content[0]
             if "type" not in first_content or "text" not in first_content:
-                print(f"     ❌ Invalid content item structure")
+                print("     ❌ Invalid content item structure")
                 results.append((tool_name, False, "Invalid content item structure"))
                 continue
 
             text = first_content["text"]
 
-            # Check if it's an expected error (client not initialized)
             if "client not initialized" in text.lower():
-                print(f"     ⚠️  Expected: Client not initialized (no API key)")
+                print("     ⚠️  Expected: Client not initialized (no API key)")
                 results.append((tool_name, True, "Expected: No API key"))
             elif "❌" in text:
-                # Tool executed but returned an error - this is expected for some operations
                 print(f"     ⚠️  Tool error (expected): {text[:100]}...")
                 results.append((tool_name, True, "Expected error"))
             else:
-                # Tool executed successfully
                 print(f"     ✅ Success: {text[:50]}...")
                 results.append((tool_name, True, "Success"))
 
@@ -206,11 +208,10 @@ async def test_tool_execution():
             print(f"     ❌ Exception: {str(e)}")
             results.append((tool_name, False, f"Exception: {str(e)}"))
 
-    # Summary
     successful = sum(1 for _, success, _ in results if success)
     total = len(results)
 
-    print(f"\n📊 Tool Execution Results:")
+    print("\n📊 Tool Execution Results:")
     for tool_name, success, message in results:
         status = "✅" if success else "❌"
         print(f"   {status} {tool_name}: {message}")
@@ -221,23 +222,23 @@ async def test_tool_execution():
 
 
 async def test_error_handling():
-    """Test error handling for invalid tool calls"""
+    """Invalid tool names and bad arguments surface as errors."""
     print("\n🚨 Testing error handling...")
 
     test_cases = [
         {
-            "name": "obs_nonexistent_tool",
+            "name": "definitely_nonexistent_tool_xyz",
             "args": {},
             "description": "Non-existent tool",
         },
         {
-            "name": "obs_keyword_search",
+            "name": "search",
             "args": {"invalid_param": "test"},
             "description": "Invalid parameters",
         },
         {
-            "name": "obs_read_note",
-            "args": {},  # Missing required 'path' parameter
+            "name": "read_note",
+            "args": {},
             "description": "Missing required parameter",
         },
     ]
@@ -256,22 +257,23 @@ async def test_error_handling():
                 "tools/call", {"name": tool_name, "arguments": args}
             )
 
-            # Should get an error response
             content = response.get("content", [])
             if content and len(content) > 0:
                 text = content[0].get("text", "")
                 if "❌" in text or "error" in text.lower() or "failed" in text.lower():
                     print(f"     ✅ Proper error handling: {text[:50]}...")
                     results.append(True)
+                elif "Unknown tool" in text:
+                    print(f"     ✅ Unknown tool: {text[:50]}...")
+                    results.append(True)
                 else:
                     print(f"     ❌ Unexpected success: {text[:50]}...")
                     results.append(False)
             else:
-                print(f"     ❌ No error response")
+                print("     ❌ No error response")
                 results.append(False)
 
         except Exception as e:
-            # Exceptions are also acceptable for error cases
             print(f"     ✅ Exception raised (acceptable): {str(e)[:50]}...")
             results.append(True)
 
@@ -282,26 +284,22 @@ async def test_error_handling():
     return successful == total
 
 
-async def test_prefix_routing():
-    """Test that prefix routing works correctly"""
-    print("\n🔀 Testing prefix routing...")
+async def test_canonical_routing():
+    """Registered names dispatch; unknown names are rejected."""
+    print("\n🔀 Testing tool name routing...")
 
     try:
-        # Test valid obs_ alias
         response = await mcp_handler.handle_request(
             "tools/call",
-            {"name": "obs_keyword_search", "arguments": {"keyword": "test"}},
+            {"name": "search", "arguments": {"keyword": "test"}},
         )
 
         content = response.get("content", [])
-        if content:
-            print("   ✅ obs_ alias routing works")
-            obs_routing = True
-        else:
-            print("   ❌ obs_ alias routing failed")
-            obs_routing = False
+        if not content:
+            print("   ❌ search tool routing failed (empty content)")
+            return False
+        print("   ✅ search dispatches correctly")
 
-        # Test invalid prefix
         response = await mcp_handler.handle_request(
             "tools/call", {"name": "invalid_prefix_tool", "arguments": {}}
         )
@@ -309,20 +307,17 @@ async def test_prefix_routing():
         content = response.get("content", [])
         if content and "Unknown tool" in content[0].get("text", ""):
             print("   ✅ Invalid tool name properly rejected")
-            invalid_routing = True
-        else:
-            print("   ❌ Invalid prefix not properly handled")
-            invalid_routing = False
+            return True
 
-        return obs_routing and invalid_routing
+        print("   ❌ Invalid tool name not properly handled")
+        return False
 
     except Exception as e:
-        print(f"   ❌ Prefix routing test failed: {e}")
+        print(f"   ❌ Routing test failed: {e}")
         return False
 
 
 async def main():
-    """Run all comprehensive tests"""
     print("🚀 Comprehensive Obsidian Tools Test Suite")
     print("=" * 60)
 
@@ -331,7 +326,7 @@ async def main():
         ("Tool Schemas", test_tool_schemas),
         ("Tool Execution", test_tool_execution),
         ("Error Handling", test_error_handling),
-        ("Prefix Routing", test_prefix_routing),
+        ("Tool routing", test_canonical_routing),
     ]
 
     results = []
@@ -344,7 +339,6 @@ async def main():
             print(f"❌ {test_name} crashed: {e}")
             results.append((test_name, False))
 
-    # Final summary
     print("\n" + "=" * 60)
     print("📊 COMPREHENSIVE TEST RESULTS")
     print("=" * 60)
@@ -359,12 +353,11 @@ async def main():
     print(f"\n🎯 Overall Results: {passed}/{total} test suites passed")
 
     if passed == total:
-        print("🎉 All Obsidian tools are working correctly!")
-        print("✅ The rollback was successful - no functionality was lost")
+        print("🎉 All checks passed.")
         return 0
-    else:
-        print("⚠️  Some issues detected. Check the output above for details.")
-        return 1
+
+    print("⚠️  Some issues detected. Check the output above for details.")
+    return 1
 
 
 if __name__ == "__main__":

@@ -149,7 +149,7 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns whi
 |------|------|--------|
 | See allowed scopes | `workspaces` | No arguments |
 | Folder tree + counts | `vault_structure` | Optional `scope` |
-| Browse files | `list_notes` | Optional `folder`, `scope` |
+| Browse files | `list_notes` | Optional `folder`, `scope`; optional mtime filters `modified_after`, `modified_before` (ISO `YYYY-MM-DD` or datetime, or `today` / `yesterday`), rolling `days` / `hours`, and `limit` (recent first) |
 | Daily notes in date range | `list_journal` | `startDate`, `endDate`; optional `scope` |
 | Find text in bodies | `search` | `keyword`; optional `folder`, `scope` |
 | Read one file | `read_note` | `path`; optional `scope` (required if same path exists in two allowed scopes) |
@@ -159,9 +159,7 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns whi
 | Append | `append_note` | `scope` if multi-scope key |
 | Delete | `delete_note` | `scope` if multi-scope key |
 
-**Canonical names** above; **`obs_*` aliases** still work (e.g. `obs_keyword_search` → `search`).
-
-**Removed:** `obs_search_notes`, `obs_execute_command` — do not call them.
+Use only the tool names in the table above (legacy `obs_*` names are not registered).
 
 ## 5. MCP resources vs tools
 

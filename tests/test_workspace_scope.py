@@ -138,6 +138,12 @@ class TestObsidianRoutedNames(unittest.TestCase):
         self.assertIn("workspaces", OBSIDIAN_ROUTED_TOOL_NAMES)
         self.assertNotIn("obs_search_notes", OBSIDIAN_ROUTED_TOOL_NAMES)
         self.assertNotIn("obs_execute_command", OBSIDIAN_ROUTED_TOOL_NAMES)
+        alias_names = [n for n in OBSIDIAN_ROUTED_TOOL_NAMES if n.startswith("obs_")]
+        self.assertEqual(
+            alias_names,
+            [],
+            msg=f"Legacy obs_* tool names must not be registered: {alias_names}",
+        )
 
 
 if __name__ == "__main__":

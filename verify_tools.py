@@ -27,28 +27,26 @@ def verify_tool_registration():
         "ping",
         "workspaces",
         "vault_structure",
-        "obs_get_vault_structure",
         "list_notes",
-        "obs_list_notes",
         "list_journal",
-        "obs_list_daily_notes",
         "search",
-        "obs_keyword_search",
         "read_note",
-        "obs_read_note",
         "create_note",
-        "obs_create_note",
         "update_note",
-        "obs_update_note",
         "append_note",
-        "obs_append_note",
         "note_exists",
-        "obs_check_note_exists",
         "delete_note",
-        "obs_delete_note",
     ]
-    
+
     registered_names = [tool.name for tool in registered_tools]
+    if len(registered_names) != len(set(registered_names)):
+        dupes = [n for n in registered_names if registered_names.count(n) > 1]
+        print(f"\n❌ Duplicate tool name(s): {sorted(set(dupes))}")
+        return False
+    legacy = [n for n in registered_names if n.startswith("obs_")]
+    if legacy:
+        print(f"\n❌ Legacy obs_* tool(s) still registered: {legacy}")
+        return False
     
     print("\n✅ Registered Tools:")
     for tool in registered_tools:
