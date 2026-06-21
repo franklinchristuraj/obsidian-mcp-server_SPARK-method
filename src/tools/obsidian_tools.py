@@ -19,6 +19,7 @@ from src.scope import (
     scoped_list_folder,
     strip_scope_prefix,
 )
+from src.vault_intelligence.tools import VaultIntelligenceTools
 from ..types import MCPTool
 from ..utils.list_notes_time import note_mtime_in_window, resolve_list_notes_time_window
 
@@ -57,6 +58,10 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "append_note": "append_note",
     "note_exists": "check_note_exists",
     "delete_note": "delete_note",
+    "resolve_entity": "resolve_entity",
+    "query_frontmatter": "query_frontmatter",
+    "get_dossier": "get_dossier",
+    "lint_vault": "lint_vault",
 }
 
 OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
@@ -67,7 +72,20 @@ class ObsidianTools:
 
     def __init__(self):
         self.client = None
+        self._vault_intel: Optional[VaultIntelligenceTools] = None
         self._initialize_client()
+
+    def _get_vault_intel(self) -> VaultIntelligenceTools:
+        if self._vault_intel is None:
+            vault_path = ""
+            if self.client:
+                vault_path = self.client.vault_path
+            if not vault_path:
+                vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
+            if not vault_path:
+                raise ValueError("OBSIDIAN_VAULT_PATH not configured")
+            self._vault_intel = VaultIntelligenceTools(vault_path)
+        return self._vault_intel
 
     def _initialize_client(self):
         """Initialize ObsidianClient with error handling"""
@@ -273,7 +291,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "workspaces",
                 (
                     "List workspace folders (scopes) allowed for this API key. "
-                    "Call early in a session; see MCP prompt vault_mcp_agent_guide for full tool and path rules."
+                    "Call early in a session; then load MCP prompt vault_mcp_agent_guide for tool workflows."
                 ),
                 {},
                 [],
@@ -296,13 +314,13 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             ),
             _tool(
                 "list_journal",
-                "Daily notes in a date range with workspace tags (deduplicated).",
+                "Daily notes in a date range with workspace tags (deduplicated). Requires startDate and endDate (YYYY-MM-DD).",
                 journal_props,
                 ["startDate", "endDate"],
             ),
             _tool(
                 "search",
-                "Keyword search in note contents (scoped).",
+                "Keyword search in note bodies (scoped). Parameter is keyword (not query). For entities prefer resolve_entity.",
                 search_props,
                 ["keyword"],
             ),
@@ -341,6 +359,94 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "Delete a note (scope required if key has multiple workspaces).",
                 delete_props,
                 ["path"],
+            ),
+            _tool(
+                "resolve_entity",
+                (
+                    "PRIMARY tool for work entity lookup by name, alias, or fuzzy match "
+                    "(e.g. Gojab → GoJob). Prefer over search+read_note fan-out. "
+                    "Returns canonical path, agent_context, key frontmatter, connections "
+                    "(with target agent_context), backlinks, recent Source History. "
+                    "Use scope=work. Call read_note only when you need the full body."
+                ),
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Entity name, alias, or partial filename (e.g. Gojab, gojob)",
+                    },
+                    "scope": sr,
+                },
+                ["name"],
+            ),
+            _tool(
+                "query_frontmatter",
+                (
+                    "Filter notes by frontmatter (AND semantics) and optional tag. "
+                    "Live file scan — do not rely on index.md. "
+                    "Returns path + agent_context only (max 50), sorted by last_updated. "
+                    "Example: filters={entity_type: customer, poc_stage: discovery}, scope=work, folder=entities."
+                ),
+                {
+                    "filters": {
+                        "type": "object",
+                        "description": "Frontmatter key/value filters, e.g. {entity_type: customer, poc_stage: discovery}",
+                        "additionalProperties": True,
+                    },
+                    "scope": sr,
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional folder under workspace (e.g. entities/customer)",
+                        "default": "",
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional tag filter (matches tags list, supports nested tags)",
+                    },
+                },
+                ["filters"],
+            ),
+            _tool(
+                "get_dossier",
+                (
+                    "Meeting-prep brief for an entity in one call. Wraps resolve_entity plus "
+                    "open questions and recent mentions across the corpus. "
+                    "Use scope=work. Prefer over manually chaining resolve_entity + read_note."
+                ),
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Entity name (same fuzzy resolution as resolve_entity)",
+                    },
+                    "scope": sr,
+                    "depth": {
+                        "type": "integer",
+                        "description": "Connection hop depth (default 1)",
+                        "default": 1,
+                    },
+                },
+                ["name"],
+            ),
+            _tool(
+                "lint_vault",
+                (
+                    "Audit vault convention drift: missing frontmatter, missing ## Connections, "
+                    "broken wikilinks, orphan entities, alias collisions. "
+                    "Read-only by default (fix=false). Use before trusting entity graph tools on a new folder."
+                ),
+                {
+                    "scope": sr,
+                    "folder": {
+                        "type": "string",
+                        "description": "Folder to scan (default entities)",
+                        "default": "entities",
+                    },
+                    "fix": {
+                        "type": "boolean",
+                        "description": "Apply safe mechanical fixes (default false)",
+                        "default": False,
+                    },
+                },
+                [],
             ),
         ]
         return tools
@@ -1371,6 +1477,42 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Alias of list_journal."""
         return await self.list_journal(startDate, endDate, scope=scope)
+
+    # =================== Vault Intelligence Tools ===================
+
+    async def resolve_entity(
+        self, name: str, scope: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().resolve_entity(name, scope=scope)
+
+    async def query_frontmatter(
+        self,
+        filters: Dict[str, Any],
+        scope: Optional[str] = None,
+        folder: Optional[str] = None,
+        tag: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().query_frontmatter(
+            filters, scope=scope, folder=folder, tag=tag
+        )
+
+    async def get_dossier(
+        self,
+        name: str,
+        scope: Optional[str] = None,
+        depth: int = 1,
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().get_dossier(name, scope=scope, depth=depth)
+
+    async def lint_vault(
+        self,
+        scope: Optional[str] = None,
+        folder: Optional[str] = None,
+        fix: bool = False,
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().lint_vault(
+            scope=scope, folder=folder, fix=fix
+        )
 
     def _extract_context(
         self, content: str, keyword: str, case_sensitive: bool = False

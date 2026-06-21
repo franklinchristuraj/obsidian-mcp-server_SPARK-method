@@ -11,8 +11,8 @@ from .types import MCPMessageType, MCPTool, MCPResource, MCPCapabilities, MCPPro
 # prompts/get "description" must match each prompt (not a generic template blurb)
 _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     "vault_mcp_agent_guide": (
-        "Canonical guide: workspace folders (personal/passion/work), MCP tool choice, "
-        "scope parameter, paths vs resources—read this before other vault prompts."
+        "Canonical guide: workspaces, all MCP tools (including vault intelligence), "
+        "scope/paths, entity graph conventions—load this first every session."
     ),
     "note_template_system": (
         "SPARK-style folders and YAML templates; paths are under a workspace "
@@ -47,8 +47,9 @@ class MCPProtocolHandler:
             "name": "obsidian-mcp-server",
             "version": "2.1.0",
             "description": (
-                "Obsidian MCP server with workspace-scoped tools (personal / passion / work). "
-                "Use MCP prompt vault_mcp_agent_guide for tool choice, paths, and scope rules."
+                "Obsidian MCP server with workspace-scoped tools (personal / passion / work) "
+                "and vault intelligence (resolve_entity, query_frontmatter, get_dossier). "
+                "Load MCP prompt vault_mcp_agent_guide first for tool choice and workflows."
             ),
         }
         self.capabilities = MCPCapabilities(
@@ -63,8 +64,8 @@ class MCPProtocolHandler:
             MCPTool(
                 name="ping",
                 description=(
-                    "Test connectivity; server is workspace-aware (personal/passion/work). "
-                    "For tool and path rules, load the vault_mcp_agent_guide prompt."
+                    "Test connectivity. For vault workflows load MCP prompt vault_mcp_agent_guide "
+                    "(entity graph tools, scope rules, tool selection)."
                 ),
                 inputSchema={
                     "type": "object",

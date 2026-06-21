@@ -17,8 +17,8 @@ class ObsidianPrompts:
             MCPPrompt(
                 name="vault_mcp_agent_guide",
                 description=(
-                    "Canonical guide: workspace folders (personal/passion/work), MCP tool choice, "
-                    "scope parameter, paths vs resources—read this before other vault prompts."
+                    "Canonical guide: workspaces, all MCP tools (including vault intelligence), "
+                    "scope/paths, entity graph conventions—load this first every session."
                 ),
                 arguments=[],
             ),
@@ -127,7 +127,7 @@ The vault is split into top-level folders (scopes):
 |-------|-------------|
 | `personal` | Journal, family, finances, health, trips, people |
 | `passion` | Research, side projects, content, learning, blueprints |
-| `work` | Employer projects, meetings, stakeholders, OKRs |
+| `work` | Employer projects, meetings, stakeholders, OKRs, **entity graph** |
 
 Each scope has its own `00_system/templates/`, `01_seeds/`, `02_projects/`, etc. Same relative path in two scopes is **two different notes**.
 
@@ -137,40 +137,80 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns whi
 
 ## 3. Paths and `scope`
 
-- **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `02_projects/My Project.md`.
+- **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`.
 - **Work meeting notes** use **`scope=work`** and paths under **`11_work-meeting-notes/`** (aligned with meeting templates in `template_utils`).
 - **Never** put `personal/`, `passion/`, or `work/` as the first segment of `path`. Use the **`scope`** parameter instead.
-- **Reads** (`search`, `list_notes`, `list_journal`, `read_note`, `note_exists`, `vault_structure`): optional `scope`. Omit it to search/list across **all scopes allowed for this key**; set it to narrow to one workspace.
+- **Reads** (search, list, vault intelligence, read): optional `scope`. Omit to include all scopes allowed for this key; set it to narrow to one workspace.
 - **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`): if the key has **more than one** allowed scope, **`scope` is required**. If the key has exactly one scope, it is auto-selected.
 
-## 4. Which tool when
+## 4. Work vault entity graph (read the structure, do not infer it)
+
+The **work** scope includes a hand-maintained knowledge graph under `entities/`:
+
+- **Entity cards** live at `entities/{entity_type}/{kebab-name}.md` (e.g. `entities/customer/gojob.md`).
+- Every card has YAML frontmatter: `type`, `created`, `agent_context`, `tags`, `entity_type` (entities), plus optional `aliases`, `poc_stage`, `lifecycle_stage`, etc.
+- **`## Connections`** lists related notes as `[[wikilinks]]` (paths workspace-relative, no `work/` prefix).
+- **`## Source History`** holds dated mention lines with wikilinks.
+- **`agent_context`** is the one-line summary — intelligence tools return this instead of full bodies.
+
+**Do not** rebuild the graph with repeated `search` + `read_note` when a vault intelligence tool applies.
+
+## 5. Which tool when
+
+### Vault intelligence (prefer for work entities — use `scope=work`)
+
+| Goal | Tool | Arguments / notes |
+|------|------|-------------------|
+| Look up customer, person, partner, concept by name or alias | **`resolve_entity`** | `name` (fuzzy/alias OK, e.g. `Gojab` → GoJob); `scope=work`. Returns path, `agent_context`, connections (with target context), backlinks, recent Source History. **One call replaces many search/read cycles.** |
+| Filter by frontmatter (live, not index files) | **`query_frontmatter`** | `filters` object, AND semantics, e.g. `{entity_type: customer, poc_stage: discovery}`; optional `folder`, `tag`; `scope=work`. Returns path + `agent_context` only (max 50). |
+| Meeting prep / stakeholder brief | **`get_dossier`** | `name` (same as resolve_entity); `scope=work`. Wraps resolve_entity + open questions + cross-vault recent mentions. |
+| Check convention drift | **`lint_vault`** | optional `scope`, `folder` (default `entities`). Read-only unless `fix=true`. |
+
+After intelligence tools return a **path**, call **`read_note`** only when you need the **full markdown body**.
+
+### General vault tools
 
 | Goal | Tool | Notes |
 |------|------|--------|
 | See allowed scopes | `workspaces` | No arguments |
 | Folder tree + counts | `vault_structure` | Optional `scope` |
-| Browse files | `list_notes` | Optional `folder`, `scope`; optional mtime filters `modified_after`, `modified_before` (ISO `YYYY-MM-DD` or datetime, or `today` / `yesterday`), rolling `days` / `hours`, and `limit` (recent first) |
-| Daily notes in date range | `list_journal` | `startDate`, `endDate`; optional `scope` |
-| Find text in bodies | `search` | `keyword`; optional `folder`, `scope` |
-| Read one file | `read_note` | `path`; optional `scope` (required if same path exists in two allowed scopes) |
+| Browse files | `list_notes` | Optional `folder`, `scope`; mtime filters `modified_after`, `modified_before`, `days`, `hours`, `limit` |
+| Daily notes in date range | `list_journal` | **`startDate`**, **`endDate`** (YYYY-MM-DD, required); optional `scope` |
+| Find text in bodies | `search` | **`keyword`** (required — not `query`); optional `folder`, `scope` |
+| Read one file | `read_note` | `path`; optional `scope` |
 | Check existence | `note_exists` | Same pattern as read |
 | Create | `create_note` | `path`, `content`; `scope` if multi-scope key |
 | Replace body | `update_note` | `scope` if multi-scope key |
 | Append | `append_note` | `scope` if multi-scope key |
 | Delete | `delete_note` | `scope` if multi-scope key |
 
-Use only the tool names in the table above (legacy `obs_*` names are not registered).
+Use only registered tool names (legacy `obs_*` names are not available).
 
-## 5. MCP resources vs tools
+### Recommended workflows
+
+**Entity question** (who is GoJob, what's their POC stage?):
+1. `resolve_entity(name="Gojab", scope="work")`
+2. `read_note` only if the returned `agent_context` / connections are insufficient
+
+**Pipeline / stage query** (all discovery-stage customers):
+1. `query_frontmatter(filters={entity_type: customer, poc_stage: discovery}, scope="work", folder="entities")`
+
+**Before a meeting**:
+1. `get_dossier(name="gojob", scope="work")`
+
+**Free-text grep across notes** (when not entity-centric):
+1. `search(keyword="...", scope="work")`
+
+## 6. MCP resources vs tools
 
 - **`resources/list`** and **`resources/read`** use URIs like `obsidian://notes/personal/06_daily-notes/...` and show the **full physical vault tree**.
-- They are **not** filtered by API-key workspace scope. If the connection is restricted (e.g. work-only key), **prefer `list_notes`, `read_note`, and `search`** with `scope` so the server enforces access.
+- They are **not** filtered by API-key workspace scope. If the connection is restricted (e.g. work-only key), **prefer scoped tools** (`list_notes`, `read_note`, `search`, vault intelligence) with `scope` so the server enforces access.
 
-## 6. Claude / Cursor skills (outside this server)
+## 7. Claude / Cursor skills (outside this server)
 
-Align user-facing skills with: routing rules (which scope for which topic), new tool names, and “call `workspaces` first.” Work-only assistants should not describe personal/passion.
+Align user-facing skills with: routing rules (which scope for which topic), tool names above, and “call `workspaces` first.” Work-only assistants should default to **`scope=work`** and vault intelligence tools for entity questions.
 
-## 7. Template prompts
+## 8. Template prompts
 
 After this guide, use **`note_template_system`** and the type-specific prompts for YAML and section structure. Template paths on disk include the workspace (e.g. `personal/00_system/templates/...`); MCP **`create_note`** resolves templates using the **`scope`** you pass.
 

@@ -1,5 +1,15 @@
 # NPM 502 Bad Gateway Troubleshooting
 
+## Port 80 already in use (host nginx)
+
+If NPM fails to start with `failed to bind host port 0.0.0.0:80/tcp: address already in use`, see **[NPM_PORT80_FIX.md](./NPM_PORT80_FIX.md)**. Quick check:
+
+```bash
+docker ps --filter name=nginx-proxy-manager
+ss -tln | grep -E ':443|:8085'
+curl -sS https://mcp.ziksaka.com/health
+```
+
 ## Issue
 NPM is returning 502 Bad Gateway when trying to reach `172.17.0.1:8888`
 
