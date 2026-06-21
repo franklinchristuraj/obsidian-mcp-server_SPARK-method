@@ -1,144 +1,88 @@
-# Claude Desktop Remote Connector Setup
+# Claude Remote Connector Setup
 
-> **Note:** This document may list older tool counts and names. For current MCP tools, scopes, and paths, use the **`vault_mcp_agent_guide`** prompt on the server and project handover docs.
+## Server Details
 
-## 🎯 Direct Connection to Remote MCP Server
+| | |
+|---|---|
+| MCP endpoint | `https://mcp.ziksaka.com/mcp` |
+| OAuth metadata | `https://mcp.ziksaka.com/.well-known/oauth-authorization-server` |
+| Tools | 17 |
+| Auth | OAuth 2.0 DCR + PKCE S256 (Claude.ai) or static Bearer token |
 
-Your MCP server is working perfectly with **11 tools available**. Here's how to connect Claude Desktop using remote connectors.
+## Claude.ai Connector (OAuth)
 
-## ✅ Server Status Verified
-- **Remote Endpoint**: ✅ Working at https://mcp.ziksaka.com/mcp
-- **Tools**: ✅ 11 tools properly exposed  
-- **Authentication**: ✅ Configured and working with proxy
-- **Status**: ✅ Active and ready for Claude Desktop
+1. Go to **claude.ai → Settings → Connectors → Add custom connector**
+2. Set **Remote MCP Server URL**: `https://mcp.ziksaka.com/mcp`
+3. Leave OAuth Client ID / Secret empty — Claude.ai self-registers via DCR
+4. Click connect and complete the browser OAuth popup
 
-## 🔧 Claude Desktop Remote Connector Setup
+Claude.ai auto-discovers the OAuth endpoints from `/.well-known/oauth-authorization-server` and registers itself. No manual client credentials needed.
 
-Since Claude Desktop only shows these fields for custom connectors:
-- **Name**
-- **Remote MCP Server URL** 
-- **OAuth Client ID** (optional)
-- **OAuth Client Secret** (optional)
+## Claude Desktop (Bearer token)
 
-### Configuration Steps:
+Add to `claude_desktop_config.json`:
 
-1. **Open Claude Desktop**
-2. **Go to Settings** → **Connectors**  
-3. **Click "Add custom connector"**
-4. **Fill in the details**:
-   - **Name**: `Obsidian Ziksaka MCP`
-   - **Remote MCP Server URL**: `https://mcp.ziksaka.com/mcp`
-   - **OAuth Client ID**: *(leave empty)*
-   - **OAuth Client Secret**: *(leave empty)*
-
-### Important: Nginx Proxy Manager Configuration
-
-Since you're handling authentication in Nginx Proxy Manager, you need to ensure:
-
-1. **Proxy is forwarding to**: `http://127.0.0.1:8888/mcp`
-2. **Authentication header**: Add `Authorization: Bearer internal-server-key`
-3. **CORS headers**: Allow Claude Desktop's requests
-
-#### Required Nginx Headers:
-```
-Authorization: Bearer internal-server-key
-Content-Type: application/json
-Access-Control-Allow-Origin: *
-Access-Control-Allow-Methods: POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type, Authorization
-```
-
-## 🎉 Nginx Configuration Working!
-
-**Status**: ✅ Proxy working correctly
-
-### ⚠️ Add CORS Headers for Claude Desktop
-
-Your current Nginx config works but needs CORS headers for Claude Desktop. Update your advanced configuration to include:
-
-```nginx
-# Handle CORS preflight requests
-if ($request_method = 'OPTIONS') {
-    add_header 'Access-Control-Allow-Origin' '*' always;
-    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-    add_header 'Access-Control-Allow-Headers' 'Content-Type, Authorization' always;
-    add_header 'Access-Control-Max-Age' 1728000 always;
-    add_header 'Content-Type' 'text/plain charset=UTF-8' always;
-    add_header 'Content-Length' 0 always;
-    return 204;
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch", "https://mcp.ziksaka.com/mcp"],
+      "env": {
+        "BEARER_TOKEN": "YOUR_API_KEY"
+      }
+    }
+  }
 }
-
-# CORS headers for actual requests  
-add_header 'Access-Control-Allow-Origin' '*' always;
-add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-add_header 'Access-Control-Allow-Headers' 'Content-Type, Authorization' always;
 ```
 
-**Complete config**: See `nginx_mcp_config.conf` for the full configuration.
+## Available Tools (17)
 
-### ✅ Verification:
+| Tool | Scope required? | Purpose |
+|---|---|---|
+| `ping` | No | Liveness check |
+| `workspaces` | No | List allowed scopes |
+| `capture` | **No** | Quick-capture to `01_seeds/` (voice/phone capture) |
+| `vault_structure` | No | Folder tree |
+| `list_notes` | No | Notes with mtime filters |
+| `list_journal` | No | Daily notes by date range |
+| `search` | No | Keyword search |
+| `read_note` | No | Read a note |
+| `create_note` | Yes (multi-workspace keys) | Create with template |
+| `update_note` | Yes | Replace content |
+| `append_note` | Yes | Append content |
+| `note_exists` | No | Check existence |
+| `delete_note` | Yes | Delete a note |
+| `resolve_entity` | No | Fuzzy entity lookup |
+| `query_frontmatter` | No | Filter by frontmatter |
+| `get_dossier` | No | Meeting-prep brief |
+| `lint_vault` | No | Audit convention drift |
+
+Scopes: `personal`, `work`, `passion`
+
+## Verify Connection
+
 ```bash
 curl -X POST https://mcp.ziksaka.com/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}'
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 ```
 
-Returns 11 tools successfully! 🎉
+Should return 17 tools.
 
-## 🧪 Testing the Connection
+## Troubleshooting
 
-After setup, you should see:
-1. **Connector indicator** in Claude Desktop interface
-2. **11 tools available**:
-   - ping
-   - search_notes  
-   - read_note
-   - create_note
-   - update_note
-   - append_note
-   - delete_note
-   - list_notes
-   - get_vault_structure
-   - execute_command
-   - keyword_search
+**Claude.ai connector never opens auth popup**
+→ Check that `/.well-known/oauth-authorization-server` includes `registration_endpoint`. Without it, DCR fails silently.
 
-## 🔍 Troubleshooting
+**"must pass scope" error on create_note**
+→ Pass `"scope": "personal"` (or `work` / `passion`). Use `capture` instead if the note doesn't belong to a specific workspace yet.
 
-### Tools Not Showing Up
-1. **Check Claude Desktop logs**:
-   - macOS: `~/Library/Logs/Claude/mcp.log`
-   - Windows: `%APPDATA%\Claude\logs\mcp.log`
-
-2. **Verify server response**:
+**Service not responding**
 ```bash
-curl -X POST https://mcp.ziksaka.com/mcp \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your-api-key" \
-  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}'
+systemctl --user status obsidian-mcp.service
+journalctl --user -u obsidian-mcp.service -n 50 --no-pager
 ```
 
-### Authentication Issues
-- Ensure your API key is correct
-- Check that the Authorization header format matches what your server expects
-
-### Connection Refused
-- Verify the server is running: `systemctl status obsidian-mcp.service`
-- Check server logs: `journalctl -u obsidian-mcp.service -f`
-
-## 📋 Current Server Configuration
-
-Your server is properly configured with:
-- ✅ **11 MCP tools** properly exposed
-- ✅ **JSON-RPC 2.0** protocol compliance  
-- ✅ **Bearer token authentication**
-- ✅ **HTTPS endpoint** at mcp.ziksaka.com
-- ✅ **Proper capabilities** returned in initialize
-
-## 🚀 Next Steps
-
-1. Try the UI method first (Method 1)
-2. If that doesn't work, use the config file method (Method 2)  
-3. Check logs for any authentication or connection issues
-4. Verify the API key is working with the curl command above
-
-The server-side fix has been applied and your MCP server is working correctly. The issue was the outdated handler that returned empty capabilities - this has been resolved and the production server restarted.
+See [`CLAUDE_CONNECTOR_DIAGNOSIS.md`](../../CLAUDE_CONNECTOR_DIAGNOSIS.md) for full diagnostic reference.

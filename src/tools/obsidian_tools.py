@@ -62,6 +62,7 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "query_frontmatter": "query_frontmatter",
     "get_dossier": "get_dossier",
     "lint_vault": "lint_vault",
+    "capture": "capture_seed",
 }
 
 OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
@@ -447,6 +448,32 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     },
                 },
                 [],
+            ),
+            _tool(
+                "capture",
+                (
+                    "Quick-capture an idea or thought to 01_seeds at vault root — no scope needed. "
+                    "Auto-generates the filename from title and date. "
+                    "Use for voice captures, passing thoughts, or anything not yet tied to a workspace. "
+                    "Seeds can later be promoted into personal/work/passion during weekly review."
+                ),
+                {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for the seed (used as filename and note heading)",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Body text — voice transcript, raw thought, or freeform text",
+                        "default": "",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Origin of this capture, e.g. voice, web, manual",
+                        "default": "",
+                    },
+                },
+                ["title"],
             ),
         ]
         return tools
@@ -1541,6 +1568,71 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         return context
 
     # =================== Tool Dispatcher ===================
+
+    async def capture_seed(
+        self,
+        title: str,
+        content: str = "",
+        source: str = "",
+    ) -> Dict[str, Any]:
+        """Write a quick-capture note directly to 01_seeds at vault root (no scope)."""
+        if not self.client:
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+
+        try:
+            import re as _re
+
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+            filename = f"{date_str}-{slug}.md"
+            vault_path = f"01_seeds/{filename}"
+
+            frontmatter = (
+                "---\n"
+                "type: seed\n"
+                f'created: "{date_str}"\n'
+                "status: raw\n"
+                f'source: "{source}"\n'
+                "tags: [seed]\n"
+                "---"
+            )
+            body_parts = [f"# {title}", "", "## Idea", ""]
+            if content.strip():
+                body_parts.append(content.strip())
+            body_parts += ["", "## Why It Matters", ""]
+
+            final_content = frontmatter + "\n\n" + "\n".join(body_parts)
+
+            success = await self.client.create_note(vault_path, final_content, True)
+            if not success:
+                raise ValueError("Note creation returned False")
+
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"✅ Captured to 01_seeds/{filename}\n\n"
+                            f"Title: {title}\n"
+                            f"Source: {source or 'unspecified'}"
+                        ),
+                    }
+                ],
+                "metadata": {
+                    "path": vault_path,
+                    "filename": filename,
+                    "title": title,
+                    "source": source,
+                    "created_at": datetime.now().isoformat(),
+                },
+            }
+
+        except ObsidianAPIError as e:
+            if e.status_code == 409:
+                raise ValueError("A seed note with this title already exists for today")
+            raise ValueError(f"Failed to capture seed: {e.message}")
+        except Exception as e:
+            raise ValueError(f"Unexpected error capturing seed: {str(e)}")
 
     async def execute_tool(
         self, tool_name: str, arguments: Dict[str, Any]

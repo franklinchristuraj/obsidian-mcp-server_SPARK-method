@@ -1,228 +1,144 @@
-# Claude Connector MCP - Note Creation Issue Diagnosis
+# Claude Connector MCP - Diagnostic Reference
 
-**Date:** 2026-02-04  
-**Status:** 🔍 Investigation Complete - Root Cause Identified
+**Last Updated:** 2026-06-21  
+**Status:** ✅ Fully Operational
 
-## Executive Summary
+## Current State
 
-The Obsidian MCP server is **functioning correctly** and **can create notes successfully**. Testing confirms:
-- ✅ Remote server at `https://mcp.ziksaka.com/mcp` is operational
-- ✅ Note creation via API works correctly
-- ✅ Notes appear in vault at `/home/franklinchris/obsidian/config/franklin-vault`
-- ✅ Obsidian REST API authentication is working
+The Obsidian MCP server is **healthy and actively serving Claude.ai** via OAuth 2.0.
 
-## Test Results
+| Component | Status | Details |
+|---|---|---|
+| Remote server | ✅ Running | `https://mcp.ziksaka.com` |
+| Systemd service | ✅ Active | Running since 2026-06-10, PID 3967024 |
+| OAuth (DCR) | ✅ Configured | PKCE S256, `/register`, `/authorize`, `/token` |
+| Claude.ai connection | ✅ Live | Seeing `Claude-User` UA in logs with bearer tokens |
+| Tools exposed | ✅ 17 tools | See list below |
 
-### ✅ Server Connectivity Tests
+---
 
-1. **Remote Server Health Check**
-   ```bash
-   curl https://mcp.ziksaka.com/health
-   # Response: {"status":"healthy","service":"obsidian-mcp-server"}
-   ```
+## Quick Diagnostics
 
-2. **Tools List**
-   ```bash
-   curl -H "Authorization: Bearer API_KEY" \
-        -H "Content-Type: application/json" \
-        -X POST https://mcp.ziksaka.com/mcp \
-        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
-   # Response: Returns all 13 tools including obs_create_note
-   ```
+### Health Check
+```bash
+curl https://mcp.ziksaka.com/health
+# {"status":"healthy","service":"obsidian-mcp-server"}
+```
 
-3. **Note Creation Test**
-   ```bash
-   curl -H "Authorization: Bearer API_KEY" \
-        -H "Content-Type: application/json" \
-        -X POST https://mcp.ziksaka.com/mcp \
-        -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"obs_create_note","arguments":{"path":"test-note.md","content":"# Test"}},"id":1}'
-   # Response: ✅ Successfully created note
-   # File verified: /home/franklinchris/obsidian/config/franklin-vault/test-note.md
-   ```
+### OAuth Metadata
+```bash
+curl https://mcp.ziksaka.com/.well-known/oauth-authorization-server
+```
+Returns `registration_endpoint`, `authorization_endpoint`, `token_endpoint`, PKCE S256.
 
-### ✅ Obsidian REST API Tests
+### Tools List (via API)
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+     -H "Content-Type: application/json" \
+     -X POST https://mcp.ziksaka.com/mcp \
+     -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+```
 
-1. **API Authentication**
-   ```bash
-   curl -H "Authorization: Bearer API_KEY" http://localhost:27123/vault/
-   # Response: Returns vault structure with all folders
-   ```
+### Service Status
+```bash
+systemctl --user status obsidian-mcp.service
+journalctl --user -u obsidian-mcp.service -n 50 --no-pager
+```
 
-2. **Obsidian Process Status**
-   - Obsidian is running (PID 223598)
-   - REST API is accessible on port 27123
-   - API key authentication works
+### Restart Service
+```bash
+systemctl --user restart obsidian-mcp.service
+```
 
-## Identified Issues
+---
 
-### 🔴 Issue #1: Systemd Service Not Running
+## Tools (16 total)
 
-**Status:** Service failed 2 months ago and hasn't been restarted
+| Tool | Purpose |
+|---|---|
+| `ping` | Connection liveness check |
+| `workspaces` | List scopes allowed for this API key |
+| `vault_structure` | Folder tree with note counts |
+| `list_notes` | List notes with mtime filters (modified_after, modified_before, rolling days/hours) |
+| `list_journal` | Daily notes in a date range |
+| `search` | Keyword search in note bodies |
+| `read_note` | Read a note by path |
+| `create_note` | Create a note (supports templates) |
+| `update_note` | Replace note content |
+| `append_note` | Append to a note |
+| `note_exists` | Check note existence |
+| `delete_note` | Delete a note |
+| `resolve_entity` | Fuzzy entity lookup — returns canonical path, frontmatter, connections, backlinks |
+| `query_frontmatter` | Filter notes by frontmatter key/value pairs |
+| `get_dossier` | Meeting-prep brief for an entity (wraps resolve_entity + mentions) |
+| `lint_vault` | Audit convention drift: missing frontmatter, broken wikilinks, orphan entities |
+| `capture` | Quick-capture to `01_seeds/` at vault root — no scope needed (for voice/phone capture) |
 
-**Details:**
-- Service: `obsidian-mcp.service`
-- Status: `failed (Result: exit-code)`
-- Last Active: Fri 2025-11-21 20:29:49 UTC
-- Error: Exit code 1
+---
 
-**Impact:** 
-- Local server not running (but remote server is working)
-- If Claude is configured to use localhost, it would fail
+## OAuth Flow (Claude.ai)
 
-**Fix Required:**
-1. Check service logs to identify startup error
-2. Fix configuration issue
-3. Restart service
+Claude.ai uses **Dynamic Client Registration (RFC 7591)**:
 
-### 🟡 Issue #2: Potential Path Mismatch
+1. Claude.ai discovers `/.well-known/oauth-authorization-server`
+2. Registers as a client via `POST /register` (public client, no secret)
+3. User authorised via `GET /authorize?response_type=code&code_challenge=...&code_challenge_method=S256`
+4. Callback to `https://claude.ai/api/mcp/auth_callback`
+5. Token exchanged via `POST /token` with PKCE verifier
 
-**Status:** Needs verification
+**Critical requirement:** `registration_endpoint` must be in the OAuth metadata or Claude.ai never opens the browser popup.
 
-**Possible Scenarios:**
-1. Claude connector might be configured with wrong vault path
-2. Remote server might have different `OBSIDIAN_VAULT_PATH` environment variable
-3. Notes might be created in a different location than expected
+---
 
-**Investigation Needed:**
-- Check remote server's `.env` file or environment variables
-- Verify Claude connector configuration
-- Test note creation with explicit paths
+## Server Endpoints
 
-### 🟡 Issue #3: Error Handling & Response Format
+| Endpoint | URL |
+|---|---|
+| MCP (remote) | `https://mcp.ziksaka.com/mcp` |
+| MCP (local) | `http://localhost:8888/mcp` |
+| Health | `https://mcp.ziksaka.com/health` |
+| OAuth metadata | `https://mcp.ziksaka.com/.well-known/oauth-authorization-server` |
+| OAuth register | `https://mcp.ziksaka.com/register` |
+| OAuth authorize | `https://mcp.ziksaka.com/authorize` |
+| OAuth token | `https://mcp.ziksaka.com/token` |
+| Obsidian REST API | `http://localhost:27123` (local only) |
 
-**Status:** Server returns success even if note creation fails silently
+**Vault path:** `/home/franklinchris/obsidian/config/franklin-vault`  
+**API key:** Stored in `.env` as `MCP_API_KEY` (do not commit)
 
-**Observation:**
-- Server might return success response before verifying file was written
-- No explicit verification that note exists after creation
-- Errors might be caught and converted to success messages
+---
 
-## Root Cause Analysis
+## Known Gotchas
 
-### Most Likely Causes (in order of probability):
+### FastAPI 401 exception handler
+`@app.exception_handler(401)` does **not** catch `HTTPException(status_code=401)` — FastAPI's built-in handler intercepts it first. Must use `@app.exception_handler(HTTPException)` to add `WWW-Authenticate` headers.
 
-1. **Claude Connector Configuration Issue** (70% probability)
-   - Wrong endpoint URL
-   - Wrong API key
-   - Wrong OAuth credentials
-   - Path mismatch in connector settings
+### Tool scope parameter
+Most write tools require `scope` (personal/work/passion) when the API key grants access to multiple workspaces. Read tools default to all allowed scopes.
 
-2. **Remote Server Environment Variables** (20% probability)
-   - Remote server might have different `OBSIDIAN_VAULT_PATH`
-   - Remote server might have different `OBSIDIAN_API_URL`
-   - Remote server might have wrong `OBSIDIAN_API_KEY`
+### Nginx Proxy Manager
+Server sits behind NPM at `mcp.ziksaka.com`. If the MCP endpoint returns unexpected HTML errors, check NPM proxy host config and SSL cert validity.
 
-3. **Silent Failure in Note Creation** (10% probability)
-   - Note creation succeeds but file isn't written
-   - Permissions issue on remote server
-   - File system sync delay
+---
 
-## Recommended Actions
+## Troubleshooting
 
-### Immediate Actions
+### Claude.ai connector not connecting
+1. Check OAuth metadata endpoint returns `registration_endpoint`
+2. Verify service is running: `systemctl --user status obsidian-mcp.service`
+3. Tail logs for auth errors: `journalctl --user -u obsidian-mcp.service -f`
+4. Confirm NPM is proxying correctly: `curl https://mcp.ziksaka.com/health`
 
-1. **Verify Claude Connector Configuration**
-   - Check Claude.ai connector settings
-   - Verify remote URL: `https://mcp.ziksaka.com/mcp`
-   - Verify OAuth Client ID: `franklinchris`
-   - Verify OAuth Client Secret matches `MCP_API_KEY`
+### Note creation fails
+1. Verify scope matches a workspace the API key can write to
+2. Check Obsidian REST API is running: `curl -H "Authorization: Bearer $OBSIDIAN_API_KEY" http://localhost:27123/vault/`
+3. Confirm `OBSIDIAN_VAULT_PATH` in `.env` matches actual vault location
 
-2. **Test End-to-End Note Creation**
-   ```bash
-   # Create a test note via Claude connector
-   # Then verify it appears in vault
-   ```
-
-3. **Check Remote Server Logs**
-   - SSH into remote server
-   - Check application logs for errors
-   - Verify environment variables match local `.env`
-
-### Fix Systemd Service
-
-1. **Check Service Logs**
-   ```bash
-   journalctl --user -u obsidian-mcp.service -n 100 --no-pager
-   ```
-
-2. **Test Service Startup**
-   ```bash
-   cd /home/franklinchris/obsidian-mcp-server
-   source venv/bin/activate
-   python3 main_production.py
-   ```
-
-3. **Fix Configuration Issues**
-   - Update `.env` file if needed
-   - Fix any Python import errors
-   - Fix any missing dependencies
-
-4. **Restart Service**
-   ```bash
-   systemctl --user restart obsidian-mcp.service
-   systemctl --user status obsidian-mcp.service
-   ```
-
-### Long-term Improvements
-
-1. **Add Explicit Verification**
-   - After note creation, verify file exists
-   - Return error if file doesn't exist after creation
-   - Add file system sync check
-
-2. **Improve Error Handling**
-   - Better error messages
-   - Log all failures
-   - Return detailed error information to client
-
-3. **Add Monitoring**
-   - Track note creation success/failure rates
-   - Alert on failures
-   - Log all operations
-
-## Testing Checklist
-
-- [x] Remote server health check
-- [x] Tools list endpoint
-- [x] Note creation via API
-- [x] File appears in vault
-- [x] Obsidian REST API authentication
-- [ ] Claude connector configuration verification
-- [ ] End-to-end test via Claude connector
-- [ ] Remote server environment variable check
-- [ ] Systemd service fix and restart
-
-## Next Steps
-
-1. **User Action Required:**
-   - Check Claude.ai connector configuration
-   - Verify connector is using correct endpoint and credentials
-   - Try creating a note via Claude and check if it appears
-
-2. **If Notes Still Don't Appear:**
-   - Check remote server logs
-   - Verify remote server environment variables
-   - Test note creation with explicit full paths
-   - Check file permissions on remote server
-
-3. **Fix Systemd Service:**
-   - Investigate why service failed
-   - Fix configuration issues
-   - Restart service for local development
-
-## Files Created
-
-- `CLAUDE_CONNECTOR_DIAGNOSIS.md` - This document
-- Test notes created during diagnosis (can be deleted)
-
-## Support Information
-
-**Server Endpoints:**
-- Remote: `https://mcp.ziksaka.com/mcp`
-- Local: `http://localhost:8888/mcp` (when service is running)
-
-**API Key:** Stored in `.env` file (do not commit to git)
-
-**Vault Path:** `/home/franklinchris/obsidian/config/franklin-vault`
-
-**Obsidian REST API:** `http://localhost:27123`
+### Service won't start
+```bash
+journalctl --user -u obsidian-mcp.service -n 100 --no-pager
+# Then test manually:
+cd /home/franklinchris/obsidian-mcp-server
+source venv/bin/activate
+python3 main_production.py
+```
