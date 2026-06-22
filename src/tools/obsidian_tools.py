@@ -452,28 +452,48 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             _tool(
                 "capture",
                 (
-                    "Quick-capture an idea or thought to 01_seeds at vault root — no scope needed. "
-                    "Auto-generates the filename from title and date. "
-                    "Use for voice captures, passing thoughts, or anything not yet tied to a workspace. "
-                    "Seeds can later be promoted into personal/work/passion during weekly review."
+                    "Quick-capture to the root 01_seeds/ inbox (pre-scope) as a `type: capture` "
+                    "note — no scope needed. Applies the vault capture template "
+                    "(00_system/templates/capture.md) to write the canonical capture schema "
+                    "(capture_type / source / captured / spark / status: inbox / target_scope) "
+                    "with an `## Idea` / `## Why It Matters` body, so the item shows up in the triage dashboard. "
+                    "Use for voice thoughts, saved posts, or excerpts not yet tied to a workspace. "
+                    "Captures are promoted (move + reframe) into <scope>/01_seeds/ during weekly review."
                 ),
                 {
                     "title": {
                         "type": "string",
-                        "description": "Short title for the seed (used as filename and note heading)",
+                        "description": "Optional short title — used to build the filename slug. If omitted, the slug is derived from the body.",
+                        "default": "",
                     },
                     "content": {
                         "type": "string",
-                        "description": "Body text — voice transcript, raw thought, or freeform text",
+                        "description": "Body text — voice transcript, raw thought, post text, or excerpt",
                         "default": "",
                     },
                     "source": {
                         "type": "string",
-                        "description": "Origin of this capture, e.g. voice, web, manual",
+                        "description": "Origin of this capture, e.g. voice, a URL, or an app name",
+                        "default": "",
+                    },
+                    "capture_type": {
+                        "type": "string",
+                        "enum": ["thought", "post", "excerpt"],
+                        "description": "Kind of capture. thought = voice/raw idea, post = saved link, excerpt = quoted text. Defaults to thought.",
+                        "default": "thought",
+                    },
+                    "spark": {
+                        "type": "string",
+                        "description": "One-line 'why this matters' / why it was saved. REQUIRED for post and excerpt; optional for thought.",
+                        "default": "",
+                    },
+                    "captured": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 capture timestamp. Defaults to now.",
                         "default": "",
                     },
                 },
-                ["title"],
+                [],
             ),
         ]
         return tools
@@ -1571,37 +1591,141 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
     async def capture_seed(
         self,
-        title: str,
+        title: str = "",
         content: str = "",
         source: str = "",
+        capture_type: str = "thought",
+        spark: str = "",
+        captured: str = "",
     ) -> Dict[str, Any]:
-        """Write a quick-capture note directly to 01_seeds at vault root (no scope)."""
+        """Write a quick-capture note to the root 01_seeds/ inbox.
+
+        Emits the canonical capture schema documented in
+        passion/07_blueprints/proj-capture-system.md (type: capture, status: inbox).
+        The format is driven by a vault-managed template at
+        00_system/templates/capture.md (variables: title, content, source, captured,
+        spark, capture_type, agent_context); an inline schema is used as a fallback
+        if that template is unavailable. Captures stay deliberately distinct from
+        `type: seed` so they stay out of ontology seed queries until they are
+        promoted into a scope at weekly triage.
+        """
         if not self.client:
             raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
 
         try:
             import re as _re
+            from ..utils.template_utils import template_detector
 
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
-            filename = f"{date_str}-{slug}.md"
+            # Vault-managed capture template (same pattern create_note uses for
+            # scoped notes). Lives at the vault root so it stays out of the
+            # 01_seeds/ Dataview inbox query.
+            capture_template_path = "00_system/templates/capture.md"
+
+            # Normalize capture_type to the three supported pipelines
+            capture_type = (capture_type or "thought").strip().lower()
+            if capture_type not in ("thought", "post", "excerpt"):
+                capture_type = "thought"
+
+            # Spark is the "why saved" line — mandatory for post/excerpt (a naked
+            # item is useless in three weeks), optional for self-justifying thoughts.
+            spark = (spark or "").strip()
+            if capture_type in ("post", "excerpt") and not spark:
+                raise ValueError(
+                    f"'spark' (one-line why) is required for capture_type='{capture_type}'"
+                )
+
+            # Resolve the capture timestamp (default: now), kept second-precision ISO.
+            now = datetime.now()
+            captured = (captured or "").strip()
+            if captured:
+                captured_iso = captured
+                try:
+                    stamp = datetime.fromisoformat(captured)
+                except ValueError:
+                    stamp = now
+            else:
+                captured_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
+                stamp = now
+
+            date_str = stamp.strftime("%Y-%m-%d")
+            time_str = stamp.strftime("%H%M")
+
+            # Filename: YYYY-MM-DD_HHmm_<short-kebab>.md (datetime-prefixed to avoid
+            # rapid-capture collisions). Slug from title, falling back to the body.
+            slug_source = title.strip() or content.strip() or capture_type
+            slug = _re.sub(r"[^a-z0-9]+", "-", slug_source.lower()).strip("-")[:48]
+            if not slug:
+                slug = capture_type
+            filename = f"{date_str}_{time_str}_{slug}.md"
             vault_path = f"01_seeds/{filename}"
 
-            frontmatter = (
-                "---\n"
-                "type: seed\n"
-                f'created: "{date_str}"\n'
-                "status: raw\n"
-                f'source: "{source}"\n'
-                "tags: [seed]\n"
-                "---"
-            )
-            body_parts = [f"# {title}", "", "## Idea", ""]
-            if content.strip():
-                body_parts.append(content.strip())
-            body_parts += ["", "## Why It Matters", ""]
+            # Short orientation line for triage. Escape quotes to keep YAML valid.
+            context_seed = (title.strip() or content.strip()).replace("\n", " ").strip()
+            agent_context = context_seed[:120].replace('"', "'")
+            if not agent_context:
+                agent_context = f"Capture ({capture_type}) awaiting triage."
 
-            final_content = frontmatter + "\n\n" + "\n".join(body_parts)
+            # Human-friendly heading for the note body. Falls back to a trimmed
+            # context line, then a generic label, so the H1 is never blank.
+            title_resolved = (
+                title.strip() or context_seed[:80].strip() or f"Capture ({capture_type})"
+            )
+
+            # Sanitize values bound for quoted YAML so a stray quote can't break
+            # the frontmatter.
+            spark_safe = spark.replace('"', "'")
+            source_safe = (source or "unspecified").replace('"', "'")
+            body = content.strip()
+
+            template_vars = {
+                "capture_type": capture_type,
+                "source": source_safe,
+                "captured": captured_iso,
+                "spark": spark_safe,
+                "agent_context": agent_context,
+                "title": title_resolved,
+                "content": body,
+            }
+
+            # Prefer the vault-managed capture template so the format lives in one
+            # editable place (consistent with create_note). Fall back to the inline
+            # schema if the template can't be read, so a capture never fails just
+            # because the template file is missing or not yet deployed.
+            final_content = None
+            try:
+                template_content = await self.client.read_note(capture_template_path)
+                final_content = (
+                    template_detector.apply_template(template_content, **template_vars).rstrip()
+                    + "\n"
+                )
+            except Exception as template_error:
+                print(
+                    f"Warning: capture template {capture_template_path} unavailable, "
+                    f"using inline schema: {template_error}"
+                )
+
+            if not final_content:
+                # Inline fallback — same schema + body shape as the vault template.
+                frontmatter = "\n".join(
+                    [
+                        "---",
+                        "type: capture",
+                        f"capture_type: {capture_type}",
+                        f'source: "{source_safe}"',
+                        f"captured: {captured_iso}",
+                        f'spark: "{spark_safe}"',
+                        "status: inbox",
+                        "target_scope:",
+                        f'agent_context: "{agent_context}"',
+                        "tags: [capture, inbox]",
+                        "---",
+                    ]
+                )
+                final_content = (
+                    f"{frontmatter}\n\n# {title_resolved}\n\n"
+                    f"## Idea\n\n{body}\n\n## Why It Matters\n\n"
+                    + (f"{spark_safe}\n" if spark_safe else "")
+                )
 
             success = await self.client.create_note(vault_path, final_content, True)
             if not success:
@@ -1613,8 +1737,9 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "type": "text",
                         "text": (
                             f"✅ Captured to 01_seeds/{filename}\n\n"
-                            f"Title: {title}\n"
-                            f"Source: {source or 'unspecified'}"
+                            f"Type: capture ({capture_type})\n"
+                            f"Source: {source or 'unspecified'}\n"
+                            f"Status: inbox (awaiting triage)"
                         ),
                     }
                 ],
@@ -1622,17 +1747,21 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "path": vault_path,
                     "filename": filename,
                     "title": title,
+                    "capture_type": capture_type,
                     "source": source,
-                    "created_at": datetime.now().isoformat(),
+                    "spark": spark,
+                    "status": "inbox",
+                    "captured": captured_iso,
+                    "created_at": now.isoformat(),
                 },
             }
 
         except ObsidianAPIError as e:
             if e.status_code == 409:
-                raise ValueError("A seed note with this title already exists for today")
-            raise ValueError(f"Failed to capture seed: {e.message}")
+                raise ValueError("A capture with this name already exists for this minute")
+            raise ValueError(f"Failed to write capture: {e.message}")
         except Exception as e:
-            raise ValueError(f"Unexpected error capturing seed: {str(e)}")
+            raise ValueError(f"Unexpected error writing capture: {str(e)}")
 
     async def execute_tool(
         self, tool_name: str, arguments: Dict[str, Any]
