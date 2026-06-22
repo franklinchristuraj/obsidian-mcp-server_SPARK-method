@@ -150,10 +150,15 @@ obsidian-mcp-server/
 │   ├── clients/
 │   │   └── obsidian_client.py  # Obsidian REST API wrapper
 │   ├── utils/
-│   │   └── template_utils.py   # Template detection + application
+│   │   ├── template_utils.py   # Template detection + application
+│   │   └── list_notes_time.py  # mtime filter helpers for list_notes
 │   └── vault_intelligence/     # Entity graph, dossier, lint tools
+│       ├── corpus.py           # Note corpus builder
+│       ├── parser.py           # Frontmatter + wikilink parser
+│       └── tools.py            # resolve_entity, get_dossier, lint_vault
 ├── tests/
 ├── scripts/
+│   └── dev-server.sh           # Local dev server manager (macOS)
 └── docs/
     ├── claude/                 # Claude connector setup
     ├── deployment/             # Production setup guides
@@ -162,19 +167,32 @@ obsidian-mcp-server/
 
 ## Local Development
 
+`scripts/dev-server.sh` manages the local server lifecycle. It creates a `.venv`, installs dependencies, and starts/stops the server in the background. It is also wired to Cursor's SessionStart/SessionEnd hooks so it starts automatically when you open the project.
+
 ```bash
 git clone <repository>
 cd obsidian-mcp-server
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
 
-# Configure environment
+# One-time setup: creates .venv, installs deps, seeds .env from .env.example
+scripts/dev-server.sh setup
+
+# Edit .env — fill in MCP_API_KEY, OBSIDIAN_API_URL, OBSIDIAN_API_KEY, OBSIDIAN_VAULT_PATH
 cp .env.example .env
-# Edit .env: MCP_API_KEY, OBSIDIAN_API_URL, OBSIDIAN_API_KEY, OBSIDIAN_VAULT_PATH
 
-python main.py
+# Start the server in the background (idempotent — safe to re-run)
+scripts/dev-server.sh start
 ```
+
+Other available commands:
+
+```bash
+scripts/dev-server.sh stop      # Gracefully stop the background server
+scripts/dev-server.sh restart   # stop + start
+scripts/dev-server.sh status    # Show running state and PID
+scripts/dev-server.sh logs      # Tail dev-server.log
+```
+
+The server binds to `http://127.0.0.1:$MCP_PORT` (default `8000` from `.env`, overridable via `MCP_PORT` env var).
 
 ## Service Management
 
