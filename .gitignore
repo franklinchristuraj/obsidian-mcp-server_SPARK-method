@@ -76,3 +76,8 @@ temp/
 *_ACCESS.md
 *_PASSWORDS.md
 *_SECRETS.md
+
+# Local MCP dev server (scripts/dev-server.sh)
+.dev-server.pid
+dev-server.log
+.claude/settings.local.json
