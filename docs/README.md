@@ -13,6 +13,7 @@ This directory contains all documentation for the Obsidian MCP Server project.
 - **[ADDING_NEW_APPLICATIONS.md](ADDING_NEW_APPLICATIONS.md)** - Guide for adding new applications
 - **[COMPLETION_SUMMARY.md](COMPLETION_SUMMARY.md)** - Project completion summary
 - **[MULTI_APP_IMPLEMENTATION_SUMMARY.md](MULTI_APP_IMPLEMENTATION_SUMMARY.md)** - Multi-app architecture summary
+- **[EVENT_ENTITY_SUPPORT.md](EVENT_ENTITY_SUPPORT.md)** - Event entity graph support + retrieval/authoring improvements
 
 ### `/docs/deployment/` - Deployment Guides
 - **[DEPLOYMENT_GUIDE.md](deployment/DEPLOYMENT_GUIDE.md)** - General deployment guide

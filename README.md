@@ -9,7 +9,7 @@ A Model Context Protocol (MCP) server providing AI assistants with full access t
 - **Service**: systemd user service (`obsidian-mcp.service`)
 - **Protocol**: MCP 2024-11-05 / JSON-RPC 2.0
 
-## Tools (17 total)
+## Tools (18 total)
 
 | Tool | Description |
 |---|---|
@@ -18,18 +18,19 @@ A Model Context Protocol (MCP) server providing AI assistants with full access t
 | `vault_structure` | Folder tree with recursive note counts |
 | `list_notes` | List notes with mtime filters (modified_after, modified_before, rolling days/hours, limit) |
 | `list_journal` | Daily notes in a date range |
-| `search` | Keyword search in note bodies |
+| `search` | Relevance-ranked keyword search over the parsed corpus (title/alias/agent_context/frontmatter scored above body) |
 | `read_note` | Read a note by path |
-| `create_note` | Create a note with optional template (scope required for multi-workspace keys) |
-| `update_note` | Replace note content |
+| `create_note` | Create a note with optional template (scope required for multi-workspace keys). Soft-validates entity-card schema |
+| `update_note` | Replace note content (preserves frontmatter for entity cards) |
 | `append_note` | Append to a note |
 | `note_exists` | Check note existence |
 | `delete_note` | Delete a note |
-| `resolve_entity` | Fuzzy entity lookup — returns canonical path, frontmatter, connections, backlinks |
-| `query_frontmatter` | Filter notes by frontmatter key/value pairs |
-| `get_dossier` | Meeting-prep brief for an entity (wraps resolve_entity + recent mentions) |
-| `lint_vault` | Audit convention drift: missing frontmatter, broken wikilinks, orphan entities |
+| `resolve_entity` | Fuzzy entity/alias lookup — returns canonical path, frontmatter, connections, backlinks, and the entity's `events` timeline (targets carry `entity_type`) |
+| `query_frontmatter` | Filter notes by frontmatter: scalar (wikilink-aware), list membership, or `{gte/lte/gt/lt/eq}` ranges |
+| `get_dossier` | Meeting-prep brief for an entity (wraps resolve_entity + recent mentions + events) |
+| `lint_vault` | Audit convention drift: per-type required frontmatter, event_type vocab, broken wikilinks (bare + full-path), orphan entities |
 | `capture` | Quick-capture to `01_seeds/` at vault root — **no scope needed** (voice/phone capture) |
+| `create_event` | Create an `event` entity card (canonical filename + schema-valid frontmatter + body) and update `## Events` back-refs |
 
 ## Vault Structure
 
@@ -49,6 +50,9 @@ vault/
 │   ├── 02_projects/
 │   ├── 03_areas/
 │   ├── 11_work-meeting-notes/
+│   ├── entities/                # Knowledge graph: entities/{entity_type}/{slug}.md
+│   │   ├── customer/  person/  partner/  company/  concept/  tool/  ...
+│   │   └── event/               # Event entities — use the `create_event` tool
 │   └── ...
 └── passion/
     ├── 00_system/templates/
@@ -213,11 +217,13 @@ Templates live in each workspace's `00_system/templates/` folder. The server aut
 | `03_areas/` | `area.md` |
 | `06_daily-notes/` | `daily-journal.md` |
 | `11_work-meeting-notes/` | `meeting-notes.md` |
+| `entities/event/` | `event_template.md` (falls back to a built-in event scaffold) |
 
-The `capture` tool uses a hardcoded generic seed template (cross-scope, no workspace needed).
+The `capture` tool uses a hardcoded generic seed template (cross-scope, no workspace needed). The `create_event` tool builds event cards from structured fields; other entity cards are hand-maintained.
 
 ## Documentation
 
+- [`docs/EVENT_ENTITY_SUPPORT.md`](docs/EVENT_ENTITY_SUPPORT.md) — event entity graph support + retrieval/authoring improvements
 - [`CLAUDE_CONNECTOR_DIAGNOSIS.md`](CLAUDE_CONNECTOR_DIAGNOSIS.md) — live diagnostic reference, OAuth gotchas, troubleshooting
 - [`docs/claude/CLAUDE_REMOTE_CONNECTOR_SETUP.md`](docs/claude/CLAUDE_REMOTE_CONNECTOR_SETUP.md) — connector setup steps
 - [`docs/deployment/`](docs/deployment/) — production deployment guides
