@@ -148,10 +148,22 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns whi
 The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 
 - **Entity cards** live at `entities/{entity_type}/{kebab-name}.md` (e.g. `entities/customer/gojob.md`).
-- Every card has YAML frontmatter: `type`, `created`, `agent_context`, `tags`, `entity_type` (entities), plus optional `aliases`, `poc_stage`, `lifecycle_stage`, etc.
+- **`entity_type`** is one of: `person`, `internal-stakeholder`, `customer`, `partner`, `company`, `concept`, `tool`, `industry`, `use-case`, `event`.
+- Most cards have YAML frontmatter: `type`, `created`, `agent_context`, `tags`, `entity_type`, plus optional `aliases`, `poc_stage`, `lifecycle_stage`, etc.
 - **`## Connections`** lists related notes as `[[wikilinks]]` (paths workspace-relative, no `work/` prefix).
 - **`## Source History`** holds dated mention lines with wikilinks.
 - **`agent_context`** is the one-line summary — intelligence tools return this instead of full bodies.
+
+### Event entities (`entity_type: event`)
+
+- Live at `entities/event/{YYYY-MM-DD}-{slug}-{event_type}.md`. They represent a single interaction (call, build session, presentation, etc.) as a graph node.
+- **`event_type`** controlled vocabulary (9 values): `discovery-call`, `build-with-me`, `poc-presentation`, `workshop`, `internal-sync`, `all-hands`, `demo`, `partner-review`, `other`.
+- Required frontmatter: `entity_type`, `event_type`, `event_date`, `agent_context`, `last_updated`. Their graph edges are **frontmatter-sourced** (`customer`, `organizations`, `participants`, `concepts`) rather than body links — the intelligence tools index these so an event still shows up as a backlink of the orgs/people/concepts it references.
+- Customer / company / partner / person / internal-stakeholder cards carry an idempotent **`## Events`** back-ref block (one `[[event]]` per line, date-descending). `resolve_entity` / `get_dossier` surface this as an `events` list — use it for an entity's interaction timeline instead of scanning.
+
+### Wikilink styles (both resolve)
+
+Event entities use **bare** links (`[[claroty]]`, `[[2026-05-01-claroty-discovery-call]]`) relying on alias/name resolution, while legacy cards use **full-path** links (`[[entities/customer/claroty.md]]`). The vault intelligence tools resolve **both** forms to the canonical path, so connections, backlinks, and `lint_vault` treat them interchangeably.
 
 **Do not** rebuild the graph with repeated `search` + `read_note` when a vault intelligence tool applies.
 
@@ -161,9 +173,9 @@ The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 
 | Goal | Tool | Arguments / notes |
 |------|------|-------------------|
-| Look up customer, person, partner, concept by name or alias | **`resolve_entity`** | `name` (fuzzy/alias OK, e.g. `Gojab` → GoJob); `scope=work`. Returns path, `agent_context`, connections (with target context), backlinks, recent Source History. **One call replaces many search/read cycles.** |
-| Filter by frontmatter (live, not index files) | **`query_frontmatter`** | `filters` object, AND semantics, e.g. `{entity_type: customer, poc_stage: discovery}`; optional `folder`, `tag`; `scope=work`. Returns path + `agent_context` only (max 50). |
-| Meeting prep / stakeholder brief | **`get_dossier`** | `name` (same as resolve_entity); `scope=work`. Wraps resolve_entity + open questions + cross-vault recent mentions. |
+| Look up customer, person, partner, concept, event by name or alias | **`resolve_entity`** | `name` (fuzzy/alias OK, e.g. `Gojab` → GoJob); `scope=work`. Returns path, `agent_context`, connections (with target context), backlinks, `events` list, recent Source History. **One call replaces many search/read cycles.** |
+| Filter by frontmatter (live, not index files) | **`query_frontmatter`** | `filters` object, AND semantics, e.g. `{entity_type: customer, poc_stage: discovery}` or `{entity_type: event, event_type: discovery-call}`; optional `folder`, `tag`; `scope=work`. Returns path + `agent_context` only (max 50). |
+| Meeting prep / stakeholder brief | **`get_dossier`** | `name` (same as resolve_entity); `scope=work`. Wraps resolve_entity + open questions + cross-vault recent mentions + the entity's `events`. |
 | Check convention drift | **`lint_vault`** | optional `scope`, `folder` (default `entities`). Read-only unless `fix=true`. |
 
 After intelligence tools return a **path**, call **`read_note`** only when you need the **full markdown body**.
@@ -176,10 +188,11 @@ After intelligence tools return a **path**, call **`read_note`** only when you n
 | Folder tree + counts | `vault_structure` | Optional `scope` |
 | Browse files | `list_notes` | Optional `folder`, `scope`; mtime filters `modified_after`, `modified_before`, `days`, `hours`, `limit` |
 | Daily notes in date range | `list_journal` | **`startDate`**, **`endDate`** (YYYY-MM-DD, required); optional `scope` |
-| Find text in bodies | `search` | **`keyword`** (required — not `query`); optional `folder`, `scope` |
+| Find text in bodies | `search` | **`keyword`** (required — not `query`); optional `folder`, `scope`. Relevance-ranked (title/alias/agent_context/frontmatter > body). |
 | Read one file | `read_note` | `path`; optional `scope` |
 | Check existence | `note_exists` | Same pattern as read |
 | Create | `create_note` | `path`, `content`; `scope` if multi-scope key |
+| Create an **event** entity | `create_event` | `event_type` (required, controlled vocab); optional `customer`, `participants`, `organizations`, `concepts`, `event_date`, `agent_context`, `outcome`. Builds the canonical filename + schema-valid frontmatter and updates `## Events` back-refs. `scope=work`. |
 | Replace body | `update_note` | `scope` if multi-scope key |
 | Append | `append_note` | `scope` if multi-scope key |
 | Delete | `delete_note` | `scope` if multi-scope key |
@@ -195,8 +208,16 @@ Use only registered tool names (legacy `obs_*` names are not available).
 **Pipeline / stage query** (all discovery-stage customers):
 1. `query_frontmatter(filters={entity_type: customer, poc_stage: discovery}, scope="work", folder="entities")`
 
+**Event / interaction query** (all discovery calls, or a POC timeline):
+1. `query_frontmatter(filters={entity_type: event, event_type: discovery-call}, scope="work", folder="entities/event")`
+2. For POC pipeline timelines, filter on `poc_stage` and sort/read by `event_date`.
+3. For one entity's interactions, use the `events` list from `resolve_entity(name=..., scope="work")`.
+
 **Before a meeting**:
-1. `get_dossier(name="gojob", scope="work")`
+1. `get_dossier(name="gojob", scope="work")` — includes the customer's `events` timeline.
+
+**Logging a new interaction** (call, build session, demo…):
+1. `create_event(event_type="discovery-call", customer="GoJob", participants=["Julien"], event_date="2026-06-01", scope="work")` — handles filename, frontmatter, and `## Events` back-refs. Prefer this over hand-building an event card with `create_note`.
 
 **Free-text grep across notes** (when not entity-centric):
 1. `search(keyword="...", scope="work")`

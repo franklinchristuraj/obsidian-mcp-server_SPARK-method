@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,9 +18,39 @@ SOURCE_HISTORY_DATE_RE = re.compile(
 REQUIRED_ENTITY_FM = frozenset(
     {"type", "created", "agent_context", "tags", "entity_type"}
 )
+# Per entity_type required-frontmatter overrides. Entity types absent here fall
+# back to REQUIRED_ENTITY_FM. Events are a distinct first-class entity whose
+# schema intentionally omits the legacy type/created/tags fields.
+REQUIRED_ENTITY_FM_BY_TYPE: Dict[str, frozenset] = {
+    "event": frozenset(
+        {"entity_type", "event_type", "event_date", "agent_context", "last_updated"}
+    ),
+}
+# Controlled vocabulary for event entity_type=event cards.
+EVENT_TYPES = frozenset(
+    {
+        "discovery-call",
+        "build-with-me",
+        "poc-presentation",
+        "workshop",
+        "internal-sync",
+        "all-hands",
+        "demo",
+        "partner-review",
+        "other",
+    }
+)
 CONNECTIONS_HEADING = "Connections"
 SOURCE_HISTORY_HEADING = "Source History"
 OPEN_QUESTIONS_HEADING = "Open Questions"
+EVENTS_HEADING = "Events"
+
+
+def required_fm_for(entity_type: str) -> frozenset:
+    """Required frontmatter keys for an entity_type (per-type override or default)."""
+    return REQUIRED_ENTITY_FM_BY_TYPE.get(
+        str(entity_type or "").strip().lower(), REQUIRED_ENTITY_FM
+    )
 
 
 @dataclass
@@ -33,6 +63,7 @@ class ParsedNote:
     sections: Dict[str, str]
     outlinks: List[str]
     agent_context: str
+    frontmatter_links: List[str] = field(default_factory=list)
     mtime: float = 0.0
 
     @property
@@ -71,7 +102,7 @@ def normalize_path_key(path: str) -> str:
 
 
 FM_FIELD_RE = re.compile(
-    r"^(?P<key>agent_context|created|last_updated|entity_type|type|source_count|poc_stage|lifecycle_stage|poc_hypothesis):\s*(?P<val>.+?)\s*$",
+    r"^(?P<key>agent_context|created|last_updated|entity_type|event_type|event_date|type|source_count|poc_stage|lifecycle_stage|poc_hypothesis):\s*(?P<val>.+?)\s*$",
     re.MULTILINE,
 )
 
@@ -123,6 +154,7 @@ def parse_note(
     text = filepath.read_text(encoding="utf-8", errors="replace")
     frontmatter: dict = {}
     body = text
+    raw_fm = ""
 
     if text.startswith("---"):
         end = text.find("\n---", 3)
@@ -162,6 +194,21 @@ def parse_note(
             seen.add(target)
             outlinks.append(target)
 
+    # Frontmatter wikilinks (event entities carry their graph edges here —
+    # customer/organizations/participants/concepts — not in the body). Scan the
+    # raw frontmatter text so this works in both full-YAML and fast-regex modes,
+    # and merge into outlinks (deduped) so backlink traversal sees them.
+    frontmatter_links: List[str] = []
+    for match in WIKILINK_RE.finditer(raw_fm):
+        target = normalize_link_target(match.group(1))
+        if not target:
+            continue
+        if target not in frontmatter_links:
+            frontmatter_links.append(target)
+        if target not in seen:
+            seen.add(target)
+            outlinks.append(target)
+
     raw_aliases = frontmatter.get("aliases") or []
     aliases: List[str] = []
     if isinstance(raw_aliases, list):
@@ -186,6 +233,7 @@ def parse_note(
         sections=sections,
         outlinks=outlinks,
         agent_context=agent_context,
+        frontmatter_links=frontmatter_links,
         mtime=mtime,
     )
 

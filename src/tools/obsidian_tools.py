@@ -5,7 +5,7 @@ Workspace-scoped vault tools using ObsidianClient
 import json
 import os
 import re
-import asyncio
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
@@ -20,8 +20,104 @@ from src.scope import (
     strip_scope_prefix,
 )
 from src.vault_intelligence.tools import VaultIntelligenceTools
+from src.vault_intelligence.parser import EVENT_TYPES, required_fm_for
 from ..types import MCPTool
 from ..utils.list_notes_time import note_mtime_in_window, resolve_list_notes_time_window
+
+
+def _entity_write_warnings(rel_path: str, content: str) -> List[str]:
+    """Non-blocking advisories for entity-card writes (schema + event vocab).
+
+    Mirrors lint_vault's checks at write time so drift is caught at the source.
+    Returns an empty list for non-entity notes or notes without entity_type.
+    """
+    if "entities/" not in rel_path:
+        return []
+    from ..utils.template_utils import template_detector
+
+    fm, _ = template_detector.extract_frontmatter(content)
+    if not fm:
+        return []
+    entity_type = str(fm.get("entity_type", "")).strip().lower()
+    if not entity_type:
+        return []
+    warnings: List[str] = []
+    missing = sorted(required_fm_for(entity_type) - set(fm.keys()))
+    if missing:
+        warnings.append(
+            f"missing required frontmatter for entity_type={entity_type}: {missing}"
+        )
+    if entity_type == "event":
+        event_type = str(fm.get("event_type", "")).strip().lower()
+        if not event_type:
+            warnings.append("event_type is empty (required, controlled vocabulary)")
+        elif event_type not in EVENT_TYPES:
+            warnings.append(
+                f"event_type '{event_type}' is not in the controlled vocabulary "
+                f"{sorted(EVENT_TYPES)}"
+            )
+    return warnings
+
+
+_EVENT_LINE_DATE_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})")
+
+
+def _upsert_events_section(
+    content: str, event_stem: str, event_type: str, event_date: str
+) -> Tuple[str, bool]:
+    """Idempotently add an event back-ref to an entity card's ## Events block.
+
+    Frontmatter is left byte-for-byte untouched (no YAML round-trip). Returns
+    (new_content, changed). The block is inserted before ## Source History,
+    else ## Connections, else appended; existing event lines are kept sorted
+    date-descending and de-duplicated on the event filename.
+    """
+    new_line = f"- [[{event_stem}]] — {event_type}, {event_date}"
+
+    head = ""
+    body = content
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            cut = end + 4
+            head = content[:cut]
+            body = content[cut:]
+
+    def _date_key(line: str) -> str:
+        m = _EVENT_LINE_DATE_RE.search(line)
+        return m.group(1) if m else ""
+
+    section_re = re.compile(r"(?m)^##\s+Events\s*$")
+    m = section_re.search(body)
+    if m:
+        start = m.end()
+        nxt = re.search(r"(?m)^##\s+", body[start:])
+        sec_end = start + nxt.start() if nxt else len(body)
+        section = body[start:sec_end]
+        lines = [
+            ln.rstrip()
+            for ln in section.splitlines()
+            if ln.strip().startswith("- ")
+        ]
+        if any(event_stem in ln for ln in lines):
+            return content, False
+        lines.append(new_line)
+        lines.sort(key=_date_key, reverse=True)
+        new_section = "\n" + "\n".join(lines) + "\n"
+        new_body = body[:start] + new_section + body[sec_end:]
+    else:
+        block = f"## Events\n{new_line}\n"
+        anchor = re.search(r"(?m)^##\s+Source History\s*$", body) or re.search(
+            r"(?m)^##\s+Connections\s*$", body
+        )
+        if anchor:
+            pos = anchor.start()
+            new_body = body[:pos] + block + "\n" + body[pos:]
+        else:
+            sep = "" if body.endswith("\n") else "\n"
+            new_body = body + sep + "\n" + block
+
+    return head + new_body, True
 
 
 def _scope_schema_read() -> Dict[str, Any]:
@@ -63,6 +159,7 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "get_dossier": "get_dossier",
     "lint_vault": "lint_vault",
     "capture": "capture_seed",
+    "create_event": "create_event",
 }
 
 OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
@@ -385,12 +482,19 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "Filter notes by frontmatter (AND semantics) and optional tag. "
                     "Live file scan — do not rely on index.md. "
                     "Returns path + agent_context only (max 50), sorted by last_updated. "
-                    "Example: filters={entity_type: customer, poc_stage: discovery}, scope=work, folder=entities."
+                    "Scalar values match exactly (wikilink-aware); a list field matches by "
+                    "membership (e.g. organizations: claroty); a value may also be a comparison "
+                    "object {gte/lte/gt/lt/eq} for dates/numbers (e.g. event_date: {gte: 2026-04-01}). "
+                    "Example: filters={entity_type: event, event_type: discovery-call}, scope=work, folder=entities/event."
                 ),
                 {
                     "filters": {
                         "type": "object",
-                        "description": "Frontmatter key/value filters, e.g. {entity_type: customer, poc_stage: discovery}",
+                        "description": (
+                            "Frontmatter key/value filters. Scalar = exact (wikilink-aware); "
+                            "list field = membership; value can be {gte/lte/gt/lt/eq: ...} for ranges. "
+                            "E.g. {entity_type: event, event_date: {gte: 2026-04-01, lte: 2026-06-30}}"
+                        ),
                         "additionalProperties": True,
                     },
                     "scope": sr,
@@ -494,6 +598,83 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     },
                 },
                 [],
+            ),
+            _tool(
+                "create_event",
+                (
+                    "Create an event entity card in the work knowledge graph "
+                    "(entities/event/). Builds the canonical "
+                    "YYYY-MM-DD-{slug}-{event_type}.md filename (customer slug when "
+                    "customer-facing, else org slug), a schema-valid frontmatter block "
+                    "(graph edges as bare wikilinks), and a # title / > agent_context / "
+                    "## Connections / ## Outcome body. By default it also idempotently "
+                    "adds a ## Events back-ref to the linked customer / participants / "
+                    "non-home organizations. Use scope=work."
+                ),
+                {
+                    "event_type": {
+                        "type": "string",
+                        "enum": sorted(EVENT_TYPES),
+                        "description": "Controlled vocabulary for the kind of interaction.",
+                    },
+                    "event_date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD. Defaults to today.",
+                        "default": "",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Event title (H1). Derived from customer/org + type if omitted.",
+                        "default": "",
+                    },
+                    "customer": {
+                        "type": "string",
+                        "description": "Customer name/slug for customer-facing events (drives filename slug). Omit for internal events.",
+                        "default": "",
+                    },
+                    "organizations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Org names/slugs involved. Defaults to ['make'] if empty.",
+                    },
+                    "participants": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Person / internal-stakeholder names or slugs.",
+                    },
+                    "concepts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Framework / topic slugs (optional).",
+                    },
+                    "agent_context": {
+                        "type": "string",
+                        "description": "One-line synthesized summary. Derived if omitted.",
+                        "default": "",
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "description": "What was decided / next step (## Outcome).",
+                        "default": "",
+                    },
+                    "source_note": {
+                        "type": "string",
+                        "description": "Wikilink target for the source meeting/engagement note.",
+                        "default": "",
+                    },
+                    "poc_stage": {
+                        "type": "string",
+                        "description": "Optional POC stage for pipeline timelines.",
+                        "default": "",
+                    },
+                    "scope": sw,
+                    "update_backrefs": {
+                        "type": "boolean",
+                        "description": "Add ## Events back-refs to linked entities (default true).",
+                        "default": True,
+                    },
+                },
+                ["event_type"],
             ),
         ]
         return tools
@@ -822,13 +1003,18 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 if path_was_normalized:
                     path_info = f"\n📍 Path normalized: {original_path} → {path}"
 
+                warnings = _entity_write_warnings(path, final_content)
+                warning_info = ""
+                if warnings:
+                    warning_info = "\n⚠️  " + "\n⚠️  ".join(warnings)
+
                 return {
                     "content": [
                         {
                             "type": "text",
                             "text": (
                                 f"✅ Successfully created note: {path} (scope={write_scope})"
-                                f"{path_info}{template_info}\n\n"
+                                f"{path_info}{template_info}{warning_info}\n\n"
                                 f"Content length: {len(final_content)} characters"
                             ),
                         }
@@ -844,6 +1030,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "template_applied": template_applied,
                         "template_source": template_source,
                         "note_type": note_type,
+                        "validation_warnings": warnings,
                     },
                 }
             else:
@@ -911,6 +1098,12 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 try:
                     existing_content = await self.client.read_note(full_path)
                     note_type = template_detector.detect_note_type_from_path(rel_path)
+                    # Entity cards (entities/customer/…, entities/person/…, etc.) are
+                    # not in the SPARK folder->type map, so detect returns None and
+                    # their hand-maintained frontmatter would be clobbered on update.
+                    # Treat any entities/ note as a structure-preserving write.
+                    if not note_type and rel_path.replace("\\", "/").startswith("entities/"):
+                        note_type = "entity"
 
                     if note_type:
                         final_content = template_detector.preserve_existing_structure(
@@ -927,13 +1120,18 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     f"\n🔒 Preserved existing format" if format_preserved else ""
                 )
 
+                warnings = _entity_write_warnings(rel_path, final_content)
+                warning_info = ""
+                if warnings:
+                    warning_info = "\n⚠️  " + "\n⚠️  ".join(warnings)
+
                 return {
                     "content": [
                         {
                             "type": "text",
                             "text": (
                                 f"✅ Successfully updated note: {rel_path} (scope={write_scope})"
-                                f"{format_info}{date_mismatch_warning}\n\n"
+                                f"{format_info}{warning_info}{date_mismatch_warning}\n\n"
                                 f"New content length: {len(final_content)} characters"
                             ),
                         }
@@ -944,6 +1142,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "content_length": len(final_content),
                         "updated_at": datetime.now().isoformat(),
                         "format_preserved": format_preserved,
+                        "validation_warnings": warnings,
                         "date_mismatch_warning": date_mismatch_warning
                         if date_mismatch_warning
                         else None,
@@ -1250,125 +1449,60 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         limit: int = 20,
         scope: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Keyword search across allowed workspaces."""
-        if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+        """Relevance-ranked keyword search over the parsed corpus (mtime-cached).
 
+        Replaces the previous read-all-notes-over-REST fan-out: the corpus is
+        parsed once and cached per file mtime, and matches are ranked with
+        title/alias/agent_context/frontmatter hits scored above plain body hits.
+        """
         if not keyword.strip():
             raise ValueError("Keyword cannot be empty")
 
-        ctx = get_effective_workspace_context()
-        allow = tuple(ctx.allowed_scopes)
+        if folder:
+            forbid_scope_prefix_in_agent_path(folder)
+
         try:
-            active = active_scopes_for_read(scope, allow)
+            matching_notes = await self._get_vault_intel().search_notes_ranked(
+                keyword,
+                scope=scope,
+                folder=folder or None,
+                limit=limit,
+                case_sensitive=case_sensitive,
+            )
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
-
-        try:
-            if folder:
-                forbid_scope_prefix_in_agent_path(folder)
-
-            all_notes: List[tuple] = []
-            for s in active:
-                lp = scoped_list_folder(folder, s)
-                part = await self.client.list_notes(lp, include_tags=False)
-                for note in part:
-                    all_notes.append((s, note))
-
-            if not all_notes:
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "No notes found in the selected workspace(s).",
-                        }
-                    ],
-                    "metadata": {
-                        "keyword": keyword,
-                        "folder": folder,
-                        "case_sensitive": case_sensitive,
-                        "total_found": 0,
-                        "limit": limit,
-                        "matching_notes": [],
-                    },
-                }
-
-            matching_notes: List[Dict[str, Any]] = []
-            search_keyword = keyword if case_sensitive else keyword.lower()
-            batch_size = 15
-
-            async def search_in_note(
-                scope_key: str, note
-            ) -> Optional[Dict[str, Any]]:
-                try:
-                    content = await self.client.read_note(note.path)
-                    search_content = content if case_sensitive else content.lower()
-                    if search_keyword not in search_content:
-                        return None
-                    rel, inferred = strip_scope_prefix(note.path, allow)
-                    used_scope = inferred or scope_key
-                    context = self._extract_context(content, keyword, case_sensitive)
-                    return {
-                        "path": rel,
-                        "scope": used_scope,
-                        "name": note.name,
-                        "size": note.size,
-                        "modified": note.modified.isoformat(),
-                        "context": context,
-                        "folder": os.path.dirname(rel) if rel else "",
-                    }
-                except Exception:
-                    return None
-
-            for i in range(0, len(all_notes), batch_size):
-                if len(matching_notes) >= limit:
-                    break
-                batch = all_notes[i : i + batch_size]
-                results = await asyncio.gather(
-                    *[search_in_note(s, note) for s, note in batch],
-                    return_exceptions=True,
-                )
-                for result in results:
-                    if result and not isinstance(result, Exception):
-                        matching_notes.append(result)
-                        if len(matching_notes) >= limit:
-                            break
-
-            matching_notes.sort(key=lambda x: x["modified"], reverse=True)
-            total_found = len(matching_notes)
-            results_text = f"# Keyword Search Results\n\n**Query:** {keyword}\n"
-            if folder:
-                results_text += f"**Folder:** {folder}\n"
-            results_text += f"**Total Found:** {total_found}\n"
-            results_text += (
-                f"**Case Sensitive:** {'Yes' if case_sensitive else 'No'}\n\n"
-            )
-            if total_found == 0:
-                results_text += "No notes found containing the specified keyword.\n"
-            else:
-                results_text += "## Matching Notes\n\n"
-                for i, note in enumerate(matching_notes, 1):
-                    results_text += f"### {i}. {note['name']} [{note['scope']}]\n"
-                    results_text += f"**Path:** {note['path']}\n"
-                    results_text += f"**Folder:** {note['folder']}\n"
-                    results_text += f"**Size:** {note['size']} bytes\n"
-                    results_text += f"**Modified:** {note['modified']}\n"
-                    results_text += f"**Context:** {note['context']}\n\n"
-
-            return {
-                "content": [{"type": "text", "text": results_text}],
-                "metadata": {
-                    "keyword": keyword,
-                    "folder": folder,
-                    "case_sensitive": case_sensitive,
-                    "total_found": total_found,
-                    "limit": limit,
-                    "matching_notes": matching_notes,
-                },
-            }
-
         except Exception as e:
             raise ValueError(f"Keyword search failed: {str(e)}")
+
+        total_found = len(matching_notes)
+        results_text = f"# Keyword Search Results\n\n**Query:** {keyword}\n"
+        if folder:
+            results_text += f"**Folder:** {folder}\n"
+        results_text += f"**Total Found:** {total_found}\n"
+        results_text += f"**Case Sensitive:** {'Yes' if case_sensitive else 'No'}\n\n"
+        if total_found == 0:
+            results_text += "No notes found containing the specified keyword.\n"
+        else:
+            results_text += "## Matching Notes (ranked)\n\n"
+            for i, note in enumerate(matching_notes, 1):
+                results_text += f"### {i}. {note['name']} [{note['scope']}]\n"
+                results_text += f"**Path:** {note['path']}\n"
+                if note.get("agent_context"):
+                    results_text += f"**Context:** {note['agent_context']}\n"
+                results_text += f"**Score:** {note['score']}\n"
+                results_text += f"**Match:** {note['context']}\n\n"
+
+        return {
+            "content": [{"type": "text", "text": results_text}],
+            "metadata": {
+                "keyword": keyword,
+                "folder": folder,
+                "case_sensitive": case_sensitive,
+                "total_found": total_found,
+                "limit": limit,
+                "matching_notes": matching_notes,
+            },
+        }
 
     async def check_note_exists(
         self, path: str, scope: Optional[str] = None
@@ -1561,32 +1695,6 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             scope=scope, folder=folder, fix=fix
         )
 
-    def _extract_context(
-        self, content: str, keyword: str, case_sensitive: bool = False
-    ) -> str:
-        """Extract context around the keyword in the content"""
-        search_content = content if case_sensitive else content.lower()
-        search_keyword = keyword if case_sensitive else keyword.lower()
-
-        # Find the first occurrence of the keyword
-        index = search_content.find(search_keyword)
-        if index == -1:
-            return "Keyword not found"
-
-        # Extract context (50 characters before and after)
-        start = max(0, index - 50)
-        end = min(len(content), index + len(keyword) + 50)
-
-        context = content[start:end].strip()
-
-        # Add ellipsis if we truncated
-        if start > 0:
-            context = "..." + context
-        if end < len(content):
-            context = context + "..."
-
-        return context
-
     # =================== Tool Dispatcher ===================
 
     async def capture_seed(
@@ -1762,6 +1870,206 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             raise ValueError(f"Failed to write capture: {e.message}")
         except Exception as e:
             raise ValueError(f"Unexpected error writing capture: {str(e)}")
+
+    async def create_event(
+        self,
+        event_type: str,
+        event_date: str = "",
+        title: str = "",
+        customer: str = "",
+        organizations: Optional[List[str]] = None,
+        participants: Optional[List[str]] = None,
+        concepts: Optional[List[str]] = None,
+        agent_context: str = "",
+        outcome: str = "",
+        source_note: str = "",
+        poc_stage: str = "",
+        scope: Optional[str] = None,
+        update_backrefs: bool = True,
+    ) -> Dict[str, Any]:
+        """Create a schema-valid event entity card and (optionally) its back-refs."""
+        if not self.client:
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+
+        HOME_ORGS = {"make", "make-company", "celonis", "celonis-company"}
+
+        event_type = (event_type or "").strip().lower()
+        if event_type not in EVENT_TYPES:
+            raise ValueError(
+                f"event_type '{event_type}' is not in the controlled vocabulary "
+                f"{sorted(EVENT_TYPES)}"
+            )
+
+        event_date = (event_date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+        try:
+            datetime.strptime(event_date, "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError("event_date must be YYYY-MM-DD") from e
+
+        def slugify(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
+
+        customer = (customer or "").strip()
+        cust_slug = slugify(customer) if customer else ""
+        org_slugs = [slugify(o) for o in (organizations or []) if str(o).strip()]
+        part_slugs = [slugify(p) for p in (participants or []) if str(p).strip()]
+        concept_slugs = [slugify(c) for c in (concepts or []) if str(c).strip()]
+        # Every event involves the home org; default organizations to make.
+        if not org_slugs:
+            org_slugs = ["make"]
+
+        fn_slug = cust_slug or org_slugs[0]
+
+        ctx = get_effective_workspace_context()
+        allow = tuple(ctx.allowed_scopes)
+        try:
+            write_scope = resolve_write_scope(scope, allow)
+        except (ValueError, PermissionError) as e:
+            raise self._access_error(e) from e
+
+        base = f"entities/event/{event_date}-{fn_slug}-{event_type}"
+        rel = f"{base}.md"
+        n = 1
+        while True:
+            full = resolve_scoped_path(rel, write_scope, allow)
+            if not await self.client.note_exists(full):
+                break
+            n += 1
+            rel = f"{base}-{n}.md"
+        event_stem = Path(rel).stem
+
+        display_subject = customer or org_slugs[0]
+        title = title.strip() or (
+            f"{display_subject.replace('-', ' ').title()} "
+            f"{event_type.replace('-', ' ').title()}"
+        )
+        agent_context = agent_context.strip() or (
+            f"{event_type.replace('-', ' ')} on {event_date}"
+            + (f" with {customer}" if customer else "")
+        )
+        ac_safe = agent_context.replace('"', "'")
+
+        fm_lines = [
+            "---",
+            "entity_type: event",
+            f"event_type: {event_type}",
+            f"event_date: {event_date}",
+            "aliases: []",
+        ]
+        if cust_slug:
+            fm_lines.append(f'customer: "[[{cust_slug}]]"')
+        fm_lines.append("organizations:")
+        fm_lines.extend(f'  - "[[{o}]]"' for o in org_slugs)
+        fm_lines.append("participants:")
+        fm_lines.extend(f'  - "[[{p}]]"' for p in part_slugs)
+        fm_lines.append("concepts:")
+        fm_lines.extend(f'  - "[[{c}]]"' for c in concept_slugs)
+        if source_note.strip():
+            sn = source_note.strip()
+            if not sn.startswith("[["):
+                sn = f"[[{sn}]]"
+            fm_lines.append(f'source_note: "{sn}"')
+        if poc_stage.strip():
+            fm_lines.append(f"poc_stage: {poc_stage.strip()}")
+        fm_lines.append(f"last_updated: {datetime.now().strftime('%Y-%m-%d')}")
+        fm_lines.append("source_count: 1")
+        fm_lines.append(f'agent_context: "{ac_safe}"')
+        fm_lines.append("---")
+
+        body_lines = [f"# {title}", "", f"> agent_context: {agent_context}", "", "## Connections"]
+        if cust_slug:
+            body_lines.append(f"- [[{cust_slug}]] - customer")
+        body_lines.extend(f"- [[{p}]] - participant" for p in part_slugs)
+        body_lines.extend(f"- [[{c}]] - concept" for c in concept_slugs)
+        if not (cust_slug or part_slugs or concept_slugs):
+            body_lines.append("- [[entity]] - related")
+        body_lines += ["", "## Outcome", f"- {outcome.strip() or 'TBD'}", ""]
+
+        content = "\n".join(fm_lines) + "\n\n" + "\n".join(body_lines)
+
+        await self.create_note(
+            path=rel,
+            content=content,
+            scope=write_scope,
+            create_folders=True,
+            use_template=False,
+        )
+
+        backref_results: List[Dict[str, str]] = []
+        if update_backrefs:
+            vi = self._get_vault_intel()
+            corpus_notes = vi.corpus.load_scope([write_scope], include_sections=False)
+            name_index = vi.corpus.index_by_name(corpus_notes)
+            targets: List[str] = []
+            if cust_slug:
+                targets.append(cust_slug)
+            targets.extend(part_slugs)
+            targets.extend(o for o in org_slugs if o not in HOME_ORGS)
+
+            seen: set = set()
+            changed_any = False
+            for slug in targets:
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                note = name_index.get(slug)
+                if note is None:
+                    backref_results.append({"entity": slug, "status": "unresolved"})
+                    continue
+                target_full = f"{write_scope}/{note.path}"
+                try:
+                    existing = await self.client.read_note(target_full)
+                    updated, changed = _upsert_events_section(
+                        existing, event_stem, event_type, event_date
+                    )
+                    if changed:
+                        await self.client.update_note(target_full, updated)
+                        changed_any = True
+                        backref_results.append(
+                            {"entity": note.path, "status": "updated"}
+                        )
+                    else:
+                        backref_results.append(
+                            {"entity": note.path, "status": "already-linked"}
+                        )
+                except Exception as e:  # best-effort; never fail the event create
+                    backref_results.append(
+                        {"entity": note.path, "status": f"error: {e}"}
+                    )
+            if changed_any:
+                vi.corpus.clear_cache()
+
+        backref_summary = ""
+        if update_backrefs:
+            updated_n = sum(1 for r in backref_results if r["status"] == "updated")
+            backref_summary = f"\nBack-refs updated: {updated_n}/{len(backref_results)}"
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"✅ Created event: {rel} (scope={write_scope})\n"
+                        f"event_type={event_type}, event_date={event_date}"
+                        f"{backref_summary}"
+                    ),
+                }
+            ],
+            "metadata": {
+                "path": rel,
+                "scope": write_scope,
+                "event_stem": event_stem,
+                "event_type": event_type,
+                "event_date": event_date,
+                "customer": cust_slug,
+                "organizations": org_slugs,
+                "participants": part_slugs,
+                "concepts": concept_slugs,
+                "backrefs_updated": update_backrefs,
+                "backref_results": backref_results,
+                "created_at": datetime.now().isoformat(),
+            },
+        }
 
     async def execute_tool(
         self, tool_name: str, arguments: Dict[str, Any]

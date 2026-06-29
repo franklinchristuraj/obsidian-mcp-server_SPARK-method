@@ -20,6 +20,9 @@ class TemplateDetector:
             "04_resources": "resource",
             "05_knowledge": "knowledge",
             "11_work-meeting-notes": "meeting-note",
+            # Event entity cards (work knowledge graph). More specific than the
+            # bare "entities" prefix so only the event subfolder is scaffolded.
+            "entities/event": "event",
         }
 
         # Vault-based template file paths (SPARK structure)
@@ -32,6 +35,7 @@ class TemplateDetector:
             "04_resources": "00_system/templates/resource_template.md",
             "05_knowledge": "00_system/templates/knowledge_template.md",
             "06_daily-notes": "00_system/templates/daily-note_template.md",
+            "entities/event": "00_system/templates/event_template.md",
         }
 
         # Folder aliases - map alternative folder names to canonical names
@@ -270,6 +274,24 @@ class TemplateDetector:
                 "status": "scheduled",
                 "tags": ["meeting", "work"],
             }
+        elif note_type == "event":
+            # Event entity card schema (work knowledge graph). Graph edges live
+            # in frontmatter (customer/organizations/participants/concepts).
+            return {
+                "entity_type": "event",
+                "event_type": "",
+                "event_date": today,
+                "aliases": [],
+                "customer": "",
+                "organizations": [],
+                "participants": [],
+                "concepts": [],
+                "source_note": "",
+                "poc_stage": "",
+                "last_updated": today,
+                "source_count": 1,
+                "agent_context": "One-line synthesized summary of this interaction",
+            }
         else:
             return {"created": today, "type": "note"}
 
@@ -466,6 +488,17 @@ class TemplateDetector:
 ## Related Links
 - [[related-project]] - [Connection]
 - [[related-area]] - [Connection]"""
+
+        elif note_type == "event":
+            return f"""# {note_name or "Event Title"}
+
+> agent_context: One-line synthesized summary of what happened in this interaction and why it matters.
+
+## Connections
+- [[entity-name]] - [How this entity relates to the event]
+
+## Outcome
+- [What was decided, agreed, or what happens next]"""
 
         else:
             return f"""# {note_name or "Note Title"}

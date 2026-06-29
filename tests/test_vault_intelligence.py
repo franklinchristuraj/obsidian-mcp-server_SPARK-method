@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -98,6 +99,346 @@ class TestVaultIntelligenceTools(unittest.IsolatedAsyncioTestCase):
         elapsed = time.perf_counter() - start
         self.assertGreater(len(notes), 200)
         self.assertLess(elapsed, 1.0, f"cold parse took {elapsed:.2f}s")
+
+
+CLAROTY_MD = """---
+type: entity
+entity_type: customer
+created: 2026-01-01
+last_updated: 2026-05-02
+agent_context: "Claroty is an OT security customer evaluating a POC."
+poc_stage: discovery
+aliases: ["Claroty Inc"]
+tags:
+  - entity
+  - customer
+---
+
+# Claroty
+
+## Connections
+- [[entities/person/julien.md]] - champion
+
+## Events
+- [[2026-05-01-claroty-discovery-call]] — discovery-call, 2026-05-01
+
+## Source History
+- [2026-05-01] — Kickoff call [[2026-05-01-claroty-discovery-call]]
+"""
+
+EVENT_MD = """---
+entity_type: event
+event_type: discovery-call
+event_date: 2026-05-01
+aliases: []
+customer: "[[claroty]]"
+organizations:
+  - "[[claroty]]"
+participants:
+  - "[[julien]]"
+concepts: []
+source_note: "[[11_work-meeting-notes/2026-05-01-claroty]]"
+poc_stage: discovery
+last_updated: 2026-05-01
+source_count: 1
+agent_context: "First discovery call with Claroty about an OT security POC."
+---
+
+# Claroty Discovery Call
+
+> agent_context: First discovery call with Claroty.
+
+## Connections
+- [[claroty]] - customer
+- [[julien]] - participant
+
+## Outcome
+- Agreed to a follow-up build session.
+"""
+
+JULIEN_MD = """---
+type: entity
+entity_type: person
+created: 2026-01-01
+last_updated: 2026-05-01
+agent_context: "Julien is the Claroty champion."
+aliases: ["Julien Martin"]
+tags:
+  - entity
+  - person
+---
+
+# Julien
+
+## Connections
+- [[entities/customer/claroty.md]] - works at
+"""
+
+
+class TestEventEntitySupport(unittest.IsolatedAsyncioTestCase):
+    """Self-contained tests for event-entity graph support using a temp vault."""
+
+    async def asyncSetUp(self) -> None:
+        from src.vault_intelligence.tools import VaultIntelligenceTools
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        ent = root / "work" / "entities"
+        (ent / "customer").mkdir(parents=True)
+        (ent / "person").mkdir(parents=True)
+        (ent / "event").mkdir(parents=True)
+        (ent / "customer" / "claroty.md").write_text(CLAROTY_MD, encoding="utf-8")
+        (ent / "person" / "julien.md").write_text(JULIEN_MD, encoding="utf-8")
+        (ent / "event" / "2026-05-01-claroty-discovery-call.md").write_text(
+            EVENT_MD, encoding="utf-8"
+        )
+        self.tools = VaultIntelligenceTools(str(root))
+
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_required_fm_for_event_vs_default(self) -> None:
+        from src.vault_intelligence.parser import REQUIRED_ENTITY_FM, required_fm_for
+
+        self.assertEqual(required_fm_for("customer"), REQUIRED_ENTITY_FM)
+        event_fm = required_fm_for("event")
+        self.assertIn("event_type", event_fm)
+        self.assertIn("event_date", event_fm)
+        self.assertNotIn("created", event_fm)
+
+    def test_parser_captures_frontmatter_links(self) -> None:
+        from src.vault_intelligence.parser import parse_note
+
+        note = parse_note(
+            Path(self._tmp.name) / "work/entities/event/2026-05-01-claroty-discovery-call.md",
+            "work",
+            "entities/event/2026-05-01-claroty-discovery-call.md",
+        )
+        self.assertIn("claroty", note.frontmatter_links)
+        self.assertIn("julien", note.frontmatter_links)
+        self.assertIn("claroty", note.outlinks)
+
+    async def test_event_bare_link_connection_resolves(self) -> None:
+        result = await self.tools.resolve_entity(
+            "2026-05-01-claroty-discovery-call", scope="work"
+        )
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["entity_type"], "event")
+        self.assertEqual(data["key_frontmatter"].get("event_type"), "discovery-call")
+        claroty_conn = [c for c in data["connections"] if c["display"] == "claroty"]
+        self.assertTrue(claroty_conn, "bare [[claroty]] connection should resolve")
+        self.assertTrue(claroty_conn[0]["agent_context_of_target"])
+
+    async def test_customer_surfaces_events_and_backlink(self) -> None:
+        result = await self.tools.resolve_entity("claroty", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        event_paths = [e["path"] for e in data["events"]]
+        self.assertTrue(
+            any("2026-05-01-claroty-discovery-call" in p for p in event_paths),
+            "## Events back-ref should surface the event",
+        )
+        backlink_paths = [b["path"] for b in data["backlinks"]]
+        self.assertTrue(
+            any("event/2026-05-01-claroty-discovery-call" in p for p in backlink_paths),
+            "event frontmatter link should make it a backlink of the customer",
+        )
+
+    async def test_person_backlink_from_frontmatter(self) -> None:
+        result = await self.tools.resolve_entity("julien", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        backlink_paths = [b["path"] for b in data["backlinks"]]
+        self.assertTrue(
+            any("event/2026-05-01-claroty-discovery-call" in p for p in backlink_paths),
+            "participant frontmatter link should backlink the event to the person",
+        )
+
+    async def test_query_frontmatter_event_type(self) -> None:
+        result = await self.tools.query_frontmatter(
+            {"entity_type": "event", "event_type": "discovery-call"},
+            scope="work",
+            folder="entities",
+        )
+        data = json.loads(result["content"][0]["text"])
+        paths = [r["path"] for r in data["results"]]
+        self.assertIn("entities/event/2026-05-01-claroty-discovery-call.md", paths)
+
+    async def test_query_frontmatter_list_membership(self) -> None:
+        # participants is a list of wikilinks; membership match should hit.
+        result = await self.tools.query_frontmatter(
+            {"entity_type": "event", "participants": "julien"},
+            scope="work",
+            folder="entities/event",
+        )
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["count"], 1)
+
+    async def test_query_frontmatter_date_range(self) -> None:
+        in_range = await self.tools.query_frontmatter(
+            {"entity_type": "event", "event_date": {"gte": "2026-04-01", "lte": "2026-06-30"}},
+            scope="work",
+            folder="entities/event",
+        )
+        self.assertEqual(json.loads(in_range["content"][0]["text"])["count"], 1)
+        out_range = await self.tools.query_frontmatter(
+            {"entity_type": "event", "event_date": {"gte": "2026-06-01"}},
+            scope="work",
+            folder="entities/event",
+        )
+        self.assertEqual(json.loads(out_range["content"][0]["text"])["count"], 0)
+
+    async def test_ranked_search_prefers_title_and_context(self) -> None:
+        results = await self.tools.search_notes_ranked(
+            "discovery", scope="work", limit=10
+        )
+        self.assertTrue(results)
+        self.assertIn("event/2026-05-01-claroty-discovery-call", results[0]["path"])
+        self.assertGreater(results[0]["score"], results[-1]["score"] - 0.01)
+
+    async def test_resolve_entity_fuzzy_alias(self) -> None:
+        # "Julien Marten" is a near-miss of the alias "Julien Martin".
+        result = await self.tools.resolve_entity("Julien Marten", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        self.assertIn("julien", data["canonical_path"])
+
+    async def test_connection_carries_entity_type(self) -> None:
+        result = await self.tools.resolve_entity(
+            "2026-05-01-claroty-discovery-call", scope="work"
+        )
+        data = json.loads(result["content"][0]["text"])
+        claroty = [c for c in data["connections"] if c["display"] == "claroty"][0]
+        self.assertEqual(claroty["entity_type_of_target"], "customer")
+
+    async def test_lint_event_schema_and_links(self) -> None:
+        result = await self.tools.lint_vault(scope="work", folder="entities")
+        data = json.loads(result["content"][0]["text"])
+        missing = " ".join(data["missing_required_frontmatter"])
+        self.assertNotIn("event/2026-05-01-claroty-discovery-call", missing)
+        self.assertEqual(data["summary"]["invalid_event_type"], 0)
+        broken = {b["link"] for b in data["broken_wikilinks"]}
+        self.assertNotIn("claroty", broken)
+        self.assertNotIn("julien", broken)
+
+
+class _FakeObsidianClient:
+    """Filesystem-backed stand-in for ObsidianClient (REST) in create_event tests."""
+
+    def __init__(self, vault_path: str):
+        self.vault_path = vault_path
+
+    def _full(self, p: str) -> Path:
+        return Path(self.vault_path) / p
+
+    async def note_exists(self, path: str) -> bool:
+        return self._full(path).is_file()
+
+    async def read_note(self, path: str) -> str:
+        return self._full(path).read_text(encoding="utf-8")
+
+    async def update_note(self, path: str, content: str) -> bool:
+        self._full(path).write_text(content, encoding="utf-8")
+        return True
+
+    async def create_note(self, path: str, content: str, create_folders: bool = True) -> bool:
+        full = self._full(path)
+        if create_folders:
+            full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+        return True
+
+
+class TestUpsertEventsSection(unittest.TestCase):
+    def test_insert_idempotent_and_sorted(self) -> None:
+        from src.tools.obsidian_tools import _upsert_events_section
+
+        card = (
+            "---\nentity_type: customer\nagent_context: x\n---\n\n"
+            "# Claroty\n\n## Connections\n- [[julien]]\n\n"
+            "## Source History\n- [2026-01-01] — note\n"
+        )
+        out, changed = _upsert_events_section(
+            card, "2026-06-01-claroty-discovery-call", "discovery-call", "2026-06-01"
+        )
+        self.assertTrue(changed)
+        self.assertLess(out.index("## Events"), out.index("## Source History"))
+        self.assertTrue(out.startswith("---\nentity_type: customer\nagent_context: x\n---"))
+
+        out2, changed2 = _upsert_events_section(
+            out, "2026-06-01-claroty-discovery-call", "discovery-call", "2026-06-01"
+        )
+        self.assertFalse(changed2)
+
+        out3, _ = _upsert_events_section(out, "2026-07-01-claroty-demo", "demo", "2026-07-01")
+        events_block = out3.split("## Events", 1)[1]
+        first_line = events_block.strip().splitlines()[0]
+        self.assertIn("2026-07-01", first_line)
+
+
+class TestCreateEventTool(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        from src.tools.obsidian_tools import ObsidianTools
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        ent = root / "work" / "entities"
+        (ent / "customer").mkdir(parents=True)
+        (ent / "person").mkdir(parents=True)
+        (ent / "customer" / "claroty.md").write_text(CLAROTY_MD, encoding="utf-8")
+        (ent / "person" / "julien.md").write_text(JULIEN_MD, encoding="utf-8")
+
+        self.tools = ObsidianTools()
+        self.tools.client = _FakeObsidianClient(str(root))
+        self.tools._vault_intel = None
+        self.root = root
+
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_create_event_writes_card_and_backrefs(self) -> None:
+        result = await self.tools.create_event(
+            event_type="discovery-call",
+            event_date="2026-06-01",
+            customer="Claroty",
+            participants=["Julien"],
+            agent_context="Discovery call with Claroty.",
+            scope="work",
+        )
+        meta = result["metadata"]
+        self.assertEqual(meta["path"], "entities/event/2026-06-01-claroty-discovery-call.md")
+
+        event_file = self.root / "work" / meta["path"]
+        self.assertTrue(event_file.is_file())
+        body = event_file.read_text(encoding="utf-8")
+        self.assertIn("entity_type: event", body)
+        self.assertIn('customer: "[[claroty]]"', body)
+
+        # Back-ref written into the customer card before ## Source History.
+        claroty = (self.root / "work/entities/customer/claroty.md").read_text(encoding="utf-8")
+        self.assertIn("## Events", claroty)
+        self.assertIn("[[2026-06-01-claroty-discovery-call]]", claroty)
+
+        statuses = {r["entity"]: r["status"] for r in meta["backref_results"]}
+        self.assertEqual(
+            statuses.get("entities/customer/claroty.md"), "updated"
+        )
+        self.assertEqual(statuses.get("entities/person/julien.md"), "updated")
+
+    async def test_invalid_event_type_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.tools.create_event(event_type="lunch", scope="work")
+
+    async def test_filename_collision_suffix(self) -> None:
+        for _ in range(2):
+            await self.tools.create_event(
+                event_type="discovery-call",
+                event_date="2026-06-01",
+                customer="Claroty",
+                scope="work",
+                update_backrefs=False,
+            )
+        events_dir = self.root / "work/entities/event"
+        names = sorted(p.name for p in events_dir.glob("*.md"))
+        self.assertIn("2026-06-01-claroty-discovery-call.md", names)
+        self.assertIn("2026-06-01-claroty-discovery-call-2.md", names)
 
 
 class TestToolRegistry(unittest.TestCase):

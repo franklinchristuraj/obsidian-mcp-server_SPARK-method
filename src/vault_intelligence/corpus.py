@@ -92,6 +92,35 @@ class VaultCorpus:
             idx[normalize_path_key(note.path)] = note
         return idx
 
+    def index_by_name(self, notes: List[ParsedNote]) -> Dict[str, ParsedNote]:
+        """Map bare filename-stems and aliases to ParsedNote for bare-wikilink resolution.
+
+        Event entities use bare links like ``[[claroty]]`` (Obsidian alias
+        resolution) instead of full-path links. This index lets the intelligence
+        tools resolve those to canonical ``entities/...`` paths. Keys that collide
+        across two different notes are dropped so a bare link never resolves to an
+        ambiguous target.
+        """
+        idx: Dict[str, ParsedNote] = {}
+        ambiguous: set = set()
+
+        def _add(key: str, note: ParsedNote) -> None:
+            k = key.strip().lower()
+            if not k or k in ambiguous:
+                return
+            existing = idx.get(k)
+            if existing is not None and existing.path != note.path:
+                del idx[k]
+                ambiguous.add(k)
+                return
+            idx[k] = note
+
+        for note in notes:
+            _add(Path(note.path).stem, note)
+            for alias in note.aliases:
+                _add(alias, note)
+        return idx
+
     def vault_file_exists(self, scope: str, workspace_rel: str) -> bool:
         rel = workspace_rel.replace("\\", "/").lstrip("/")
         full = self.vault_path / scope / rel
