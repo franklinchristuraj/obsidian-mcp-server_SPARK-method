@@ -28,13 +28,13 @@ class TemplateDetector:
         # Vault-based template file paths (SPARK structure)
         # Maps folder to template file path in vault
         self.vault_templates = {
-            "11_work-meeting-notes": "00_system/templates/meeting-notes_template.md",
-            "01_seeds": "00_system/templates/seed_template.md",
-            "02_projects": "00_system/templates/project_template.md",
-            "03_areas": "00_system/templates/area_template.md",
-            "04_resources": "00_system/templates/resource_template.md",
-            "05_knowledge": "00_system/templates/knowledge_template.md",
-            "06_daily-notes": "00_system/templates/daily-note_template.md",
+            "11_work-meeting-notes": "00_system/templates/meeting-notes.md",
+            "01_seeds": "00_system/templates/seed.md",
+            "02_projects": "00_system/templates/project.md",
+            "03_areas": "00_system/templates/area.md",
+            "04_resources": "00_system/templates/resource.md",
+            "05_knowledge": "00_system/templates/knowledge.md",
+            "06_daily-notes": "00_system/templates/daily-journal.md",
             "entities/event": "00_system/templates/event_template.md",
         }
 
@@ -42,6 +42,8 @@ class TemplateDetector:
         # This allows flexible folder naming while still applying the right templates
         self.folder_aliases = {
             # Meeting notes variations
+            "11_meeting-notes": "11_work-meeting-notes",
+            "11 meeting notes": "11_work-meeting-notes",
             "work-meeting-notes": "11_work-meeting-notes",
             "work meeting notes": "11_work-meeting-notes",
             "meetings": "11_work-meeting-notes",
@@ -130,6 +132,33 @@ class TemplateDetector:
                         return f"{ws}/{template_path}"
                 return template_path
         return None
+
+    def _legacy_template_path(self, primary: str) -> Optional[str]:
+        """Legacy vault template filename (e.g. meeting-notes_template.md)."""
+        if not primary.endswith(".md"):
+            return None
+        dirname, filename = primary.rsplit("/", 1) if "/" in primary else ("", primary)
+        legacy_names = {
+            "daily-journal.md": "daily-note_template.md",
+        }
+        legacy_filename = legacy_names.get(filename)
+        if not legacy_filename:
+            stem = filename[:-3]
+            legacy_filename = f"{stem}_template.md"
+        return f"{dirname}/{legacy_filename}" if dirname else legacy_filename
+
+    def get_template_candidate_paths(
+        self, path: str, workspace_scope: Optional[str] = None
+    ) -> list[str]:
+        """Primary vault template path plus legacy _template.md fallback."""
+        primary = self.get_template_path_for_folder(path, workspace_scope)
+        if not primary:
+            return []
+        candidates = [primary]
+        legacy = self._legacy_template_path(primary)
+        if legacy and legacy not in candidates:
+            candidates.append(legacy)
+        return candidates
 
     def apply_template(self, template_content: str, **variables) -> str:
         """
@@ -796,6 +825,30 @@ class TemplateDetector:
         extracted["discussion"] = "\n".join(discussion_lines).strip()
 
         return extracted
+
+
+async def read_vault_template(client: Any, candidate_paths: list[str]) -> Tuple[str, str]:
+    """
+    Read the first non-empty template from candidate vault paths.
+
+    Returns (content, resolved_path). Raises ValueError if a template file exists
+    but is empty; raises the last read error if all paths are missing.
+    """
+    last_error: Optional[Exception] = None
+    empty_error: Optional[Exception] = None
+    for path in candidate_paths:
+        try:
+            content = await client.read_note(path)
+            if content.strip():
+                return content, path
+            empty_error = ValueError(f"Template at {path} is empty")
+        except Exception as exc:
+            last_error = exc
+    if empty_error:
+        raise empty_error
+    if last_error:
+        raise last_error
+    raise ValueError("No template paths provided")
 
 
 # Global instance

@@ -129,6 +129,14 @@ class TestTemplateScopePrefix(unittest.TestCase):
         self.assertTrue(p.startswith("personal/"))
         self.assertIn("templates", p)
 
+    def test_meeting_notes_template_path(self) -> None:
+        from src.utils.template_utils import template_detector
+
+        p = template_detector.get_template_path_for_folder(
+            "11_meeting-notes/sync.md", workspace_scope="work"
+        )
+        self.assertEqual(p, "work/00_system/templates/meeting-notes.md")
+
 
 class TestObsidianRoutedNames(unittest.TestCase):
     def test_search_routed(self) -> None:

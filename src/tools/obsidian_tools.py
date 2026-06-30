@@ -804,7 +804,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
 
         try:
-            from ..utils.template_utils import template_detector
+            from ..utils.template_utils import read_vault_template, template_detector
 
             original_path = path
             normalized_path = template_detector.normalize_folder_path(path)
@@ -824,6 +824,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             template_applied = False
             note_type = None
             template_source = "none"
+            resolved_template_path: Optional[str] = None
+            vault_template_path: Optional[str] = None
 
             # Check if user provided content with frontmatter
             # If frontmatter exists, user has structured their content - don't override with templates
@@ -900,14 +902,20 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
                 # Only proceed with vault/hardcoded templates if smart builder didn't handle it
                 if not template_applied:
-                    vault_template_path = template_detector.get_template_path_for_folder(
+                    template_candidates = template_detector.get_template_candidate_paths(
                         path, workspace_scope=write_scope
                     )
+                    vault_template_path = (
+                        template_candidates[0] if template_candidates else None
+                    )
 
-                    if vault_template_path:
-                        # Try to read template from vault
+                    if template_candidates:
                         try:
-                            template_content = await self.client.read_note(vault_template_path)
+                            template_content, resolved_template_path = (
+                                await read_vault_template(
+                                    self.client, template_candidates
+                                )
+                            )
 
                             # Prepare default template variables
                             note_name = (
@@ -931,20 +939,37 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                             templated_content = template_detector.apply_template(
                                 template_content, **default_vars
                             )
-                            
+
+                            if not templated_content.strip():
+                                raise ValueError(
+                                    f"Template at {resolved_template_path} rendered empty content"
+                                )
+
                             # Append user's original content to the template
                             # This preserves any content provided even without frontmatter
                             if content.strip():
                                 final_content = templated_content + "\n\n" + content.strip()
                             else:
                                 final_content = templated_content
-                            
+
                             template_applied = True
                             template_source = "vault"
 
+                        except ValueError as template_error:
+                            if "empty" in str(template_error).lower():
+                                raise ValueError(
+                                    "Template rendering produced empty content. "
+                                    f"Check template at "
+                                    f"{resolved_template_path or vault_template_path} "
+                                    "and template_vars keys."
+                                ) from template_error
+                            raise
                         except Exception as template_error:
                             # Fall back to hardcoded templates if vault template fails
-                            print(f"Warning: Could not read vault template {vault_template_path}: {template_error}")
+                            print(
+                                f"Warning: Could not read vault template "
+                                f"{vault_template_path}: {template_error}"
+                            )
                             vault_template_path = None
 
                     # Fall back to hardcoded templates if no vault template
@@ -961,15 +986,23 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                                     note_type, path
                                 )
 
+                                note_name = (
+                                    path.split("/")[-1]
+                                    .replace(".md", "")
+                                    .replace("-", " ")
+                                    .title()
+                                )
+                                if template_vars:
+                                    if template_vars.get("title"):
+                                        note_name = str(template_vars["title"])
+                                    if template_vars.get("date"):
+                                        default_frontmatter["date"] = str(
+                                            template_vars["date"]
+                                        )
+
                                 # Use the body content (original content without frontmatter)
                                 # If body is empty, use template body
                                 if not body.strip():
-                                    note_name = (
-                                        path.split("/")[-1]
-                                        .replace(".md", "")
-                                        .replace("-", " ")
-                                        .title()
-                                    )
                                     body = template_detector.get_default_body_template(
                                         note_type, note_name
                                     )
@@ -982,6 +1015,13 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                                 )
                                 template_applied = True
                                 template_source = "hardcoded"
+
+            if use_template and not user_provided_frontmatter and not final_content.strip():
+                raise ValueError(
+                    "Template rendering produced empty content. "
+                    f"Check template at {resolved_template_path or vault_template_path or 'hardcoded fallback'} "
+                    "and template_vars keys."
+                )
 
             success = await self.client.create_note(full_path, final_content, create_folders)
 
