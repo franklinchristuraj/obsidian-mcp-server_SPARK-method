@@ -20,7 +20,7 @@ def check_python_version():
 
 def check_dependencies():
     """Check if required packages are installed"""
-    required = ['fastapi', 'uvicorn', 'httpx', 'pydantic', 'yaml']
+    required = ['fastapi', 'uvicorn', 'pydantic', 'yaml']
     missing = []
     
     for package in required:
@@ -41,8 +41,6 @@ def check_env_file():
     env_path = Path('.env')
     required_vars = [
         'MCP_API_KEY',
-        'OBSIDIAN_API_URL',
-        'OBSIDIAN_API_KEY',
         'OBSIDIAN_VAULT_PATH'
     ]
     
@@ -73,51 +71,28 @@ def check_env_file():
     
     return len(missing) == 0
 
-def check_obsidian_connection():
-    """Check if Obsidian API is accessible"""
-    import httpx
-    
-    api_url = os.getenv("OBSIDIAN_API_URL")
-    api_key = os.getenv("OBSIDIAN_API_KEY")
-    
-    if not api_url or not api_key:
-        print("⚠️  Skipping Obsidian connection check (missing config)")
-        return None
-    
-    try:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        # Disable SSL verification for self-signed certs
-        client = httpx.Client(verify=False, timeout=5.0)
-        response = client.get(f"{api_url}/", headers=headers)
-        
-        if response.status_code == 200:
-            print(f"✅ Obsidian API accessible at {api_url}")
-            return True
-        else:
-            print(f"⚠️  Obsidian API returned status {response.status_code}")
-            return False
-    except httpx.ConnectError:
-        print(f"❌ Cannot connect to Obsidian API at {api_url}")
-        print("💡 Check if Obsidian REST API plugin is running")
-        return False
-    except Exception as e:
-        print(f"⚠️  Error checking Obsidian API: {e}")
-        return None
-
 def check_vault_path():
-    """Check if vault path exists"""
+    """Check if vault path exists and has the expected scope folders"""
     vault_path = os.getenv("OBSIDIAN_VAULT_PATH")
-    
+
     if not vault_path:
         print("⚠️  OBSIDIAN_VAULT_PATH not set")
         return None
-    
-    if os.path.exists(vault_path):
-        print(f"✅ Vault path exists: {vault_path}")
-        return True
-    else:
+
+    if not os.path.exists(vault_path):
         print(f"❌ Vault path not found: {vault_path}")
         return False
+
+    print(f"✅ Vault path exists: {vault_path}")
+    missing_scopes = [
+        s for s in ("personal", "passion", "work")
+        if not os.path.isdir(os.path.join(vault_path, s))
+    ]
+    if missing_scopes:
+        print(f"⚠️  Missing scope folders: {missing_scopes}")
+    else:
+        print("✅ personal/, passion/, work/ scope folders present")
+    return True
 
 def main():
     print("🔍 Obsidian MCP Server Setup Verification")
@@ -137,14 +112,7 @@ def main():
     checks.append(check_env_file())
     checks.append(check_vault_path())
     print()
-    
-    print("🔌 Checking Obsidian Connection:")
-    print("-" * 30)
-    obsidian_check = check_obsidian_connection()
-    if obsidian_check is not None:
-        checks.append(obsidian_check)
-    print()
-    
+
     print("=" * 50)
     print("📋 SUMMARY:")
     passed = sum(1 for c in checks if c)
@@ -167,9 +135,6 @@ def main():
             print("   2. Create .env file with required variables")
         if not checks[3] if len(checks) > 3 else False:
             print("   3. Verify OBSIDIAN_VAULT_PATH points to your vault")
-        if obsidian_check is False:
-            print("   4. Ensure Obsidian REST API plugin is running")
-            print("   5. Check OBSIDIAN_API_URL and OBSIDIAN_API_KEY")
         return 1
 
 if __name__ == "__main__":

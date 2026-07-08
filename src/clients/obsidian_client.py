@@ -1,17 +1,26 @@
 """
-Obsidian REST API Client Wrapper
-Enhanced with full CRUD operations and vault management
+Obsidian filesystem-native client.
+
+Reads and writes vault files directly on disk via a shared VaultCorpus - no
+Obsidian REST API, no bearer token, no dependency on any Obsidian process
+being alive. Public method names/signatures match the old REST client so
+callers (src/tools/obsidian_tools.py, src/resources/obsidian_resources.py)
+need no changes.
 """
-import httpx
-import json
-import urllib.parse
-import os
 import glob
-import asyncio
-from typing import Optional, List, Dict, Any, Union
+import os
+import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
-import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..scope import KNOWN_SCOPES
+from ..vault_intelligence.corpus import ConcurrentModificationError, VaultCorpus
+
+# Threshold matches scripts/obsidian-sync-watchdog.sh; kept in sync manually.
+SYNC_STALE_THRESHOLD_SECONDS = 1800
 
 
 @dataclass
@@ -49,7 +58,12 @@ class VaultStructure:
 
 
 class ObsidianAPIError(Exception):
-    """Custom exception for Obsidian API errors"""
+    """Raised for note-not-found / already-exists / filesystem errors.
+
+    Kept as the same exception shape the old REST client used (message +
+    optional status_code) since callers pattern-match on status_code (e.g.
+    404 -> "not found", 409 -> "already exists").
+    """
 
     def __init__(self, message: str, status_code: Optional[int] = None):
         self.message = message
@@ -57,595 +71,246 @@ class ObsidianAPIError(Exception):
         super().__init__(self.message)
 
 
+# Directory name components excluded from whole-vault scans (get_vault_structure,
+# list_notes without a scope-prefixed folder). Anything dot-prefixed (.git,
+# .trash, .obsidian, .mcp-write.lock's parent) plus stray non-vault dirs.
+_EXCLUDED_DIR_NAMES = {"node_modules"}
+
+
+def _is_excluded(rel_parts: Tuple[str, ...]) -> bool:
+    return any(p.startswith(".") or p in _EXCLUDED_DIR_NAMES for p in rel_parts)
+
+
+def _split_scope(path: str) -> Tuple[str, str]:
+    """Every path reaching this client is scope-prefixed (obsidian_tools.py
+    always resolves through src.scope.resolve_scoped_path first)."""
+    p = (path or "").lstrip("/")
+    if "/" not in p:
+        raise ObsidianAPIError(f"Path must include a workspace scope prefix: {path!r}")
+    scope, rel = p.split("/", 1)
+    if scope not in KNOWN_SCOPES:
+        raise ObsidianAPIError(
+            f"Path must start with a workspace scope {KNOWN_SCOPES}: {path!r}"
+        )
+    return scope, rel
+
+
 class ObsidianClient:
-    """
-    Enhanced Obsidian REST API client with full CRUD operations
-    """
+    """Filesystem-native client with full CRUD operations and vault management."""
 
-    def __init__(self):
-        self.api_url = os.getenv("OBSIDIAN_API_URL", "http://localhost:36961")
-        self.api_key = os.getenv("OBSIDIAN_API_KEY")
-        self.vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
-
-        if not self.api_key:
-            raise ValueError("OBSIDIAN_API_KEY environment variable is required")
-
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        # Alternative headers to try if Bearer fails
-        self.alt_headers = [
-            {"Authorization": self.api_key, "Content-Type": "application/json"},
-            {"x-api-key": self.api_key, "Content-Type": "application/json"},
-            {"X-API-Key": self.api_key, "Content-Type": "application/json"},
-            {"API-Key": self.api_key, "Content-Type": "application/json"},
-        ]
-
-        # Cache for vault structure
-        self._vault_structure_cache: Optional[VaultStructure] = None
-        self._cache_timestamp: Optional[datetime] = None
-        self._cache_ttl = 300  # 5 minutes
-
-        # Cache for filesystem scan (independent of vault structure)
-        self._filesystem_notes_cache: Optional[List[NoteMetadata]] = None
-        self._filesystem_cache_timestamp: Optional[datetime] = None
-        self._filesystem_cache_ttl = 180  # 3 minutes (shorter than vault structure)
+    def __init__(self, corpus: Optional[VaultCorpus] = None):
+        if corpus is not None:
+            self.corpus = corpus
+        else:
+            vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
+            if not vault_path:
+                raise ValueError("OBSIDIAN_VAULT_PATH environment variable is required")
+            self.corpus = VaultCorpus(vault_path)
+        self.vault_path = str(self.corpus.vault_path)
 
     # =================== Basic Vault Operations ===================
 
-    def _discover_notes_filesystem(self, include_tags: bool = False, use_cache: bool = True) -> List[NoteMetadata]:
-        """
-        Discover all notes in the vault using filesystem scanning
-        This is a fallback when the REST API doesn't provide file listings
-
-        Args:
-            include_tags: Whether to read file content to extract tags (expensive!)
-            use_cache: Whether to use cached results if available
-        """
-        # Check cache first
-        if use_cache and self._filesystem_notes_cache and self._filesystem_cache_timestamp:
-            cache_age = (datetime.now() - self._filesystem_cache_timestamp).total_seconds()
-            if cache_age < self._filesystem_cache_ttl:
-                # If cache has tags but we don't need them, or cache matches our needs, return it
-                if not include_tags or (self._filesystem_notes_cache and self._filesystem_notes_cache[0].tags is not None):
-                    return self._filesystem_notes_cache
-
-        notes = []
-        if not self.vault_path or not os.path.exists(self.vault_path):
-            return notes
-
-        try:
-            # Find all .md files recursively
-            md_pattern = os.path.join(self.vault_path, "**", "*.md")
-            md_files = glob.glob(md_pattern, recursive=True)
-
-            for file_path in md_files:
-                try:
-                    # Get relative path from vault root
-                    rel_path = os.path.relpath(file_path, self.vault_path)
-                    # Convert Windows paths to forward slashes
-                    rel_path = rel_path.replace(os.sep, "/")
-                    if ".obsidian" in rel_path.split("/"):
-                        continue
-
-                    # Get file stats
-                    stat = os.stat(file_path)
-                    file_size = stat.st_size
-                    modified_time = datetime.fromtimestamp(stat.st_mtime)
-                    created_time = datetime.fromtimestamp(stat.st_ctime)
-
-                    # Extract tags ONLY if requested (lazy-loading optimization)
-                    tags = None
-                    if include_tags:
-                        try:
-                            with open(file_path, "r", encoding="utf-8") as f:
-                                content = f.read(
-                                    500
-                                )  # Read first 500 chars for frontmatter
-                                tags = self._extract_tags(content)
-                        except:
-                            pass  # Ignore read errors
-
-                    note = NoteMetadata(
-                        path=rel_path,
-                        name=os.path.basename(file_path),
-                        size=file_size,
-                        modified=modified_time,
-                        created=created_time,
-                        tags=tags,
-                    )
-                    notes.append(note)
-
-                except Exception as e:
-                    # Skip files that can't be processed
-                    continue
-
-        except Exception as e:
-            print(f"Warning: Could not scan filesystem for notes: {e}")
-
-        # Cache the results
-        self._filesystem_notes_cache = notes
-        self._filesystem_cache_timestamp = datetime.now()
-
-        return notes
-
     async def get_vault_info(self) -> Dict[str, Any]:
         """Get vault information"""
-        async with httpx.AsyncClient(verify=False) as client:
-            # Try Bearer token first
-            try:
-                response = await client.get(
-                    f"{self.api_url}/vault/", headers=self.headers, timeout=10.0
-                )
-                response.raise_for_status()
-
-                # Handle empty response from Obsidian API
-                if not response.content:
-                    return {
-                        "name": "Unknown Vault",
-                        "path": self.vault_path,
-                        "status": "connected",
-                    }
-
-                return response.json()
-            except httpx.HTTPStatusError as e:
-                print(
-                    f"🔍 HTTP Error: Status {e.response.status_code}, Response: {e.response.text}"
-                )
-                if e.response.status_code in [401, 403]:
-                    # Try alternative authentication methods
-                    for i, alt_headers in enumerate(self.alt_headers):
-                        try:
-                            print(
-                                f"🔄 Trying auth method {i+1}: {list(alt_headers.keys())[0]}"
-                            )
-                            response = await client.get(
-                                f"{self.api_url}/vault/",
-                                headers=alt_headers,
-                                timeout=10.0,
-                            )
-                            response.raise_for_status()
-                            print(
-                                f"✅ Authentication successful with method {i+1}: {list(alt_headers.keys())[0]}"
-                            )
-
-                            # Update headers for future requests
-                            self.headers = alt_headers
-
-                            if not response.content:
-                                return {
-                                    "name": "Unknown Vault",
-                                    "path": self.vault_path,
-                                    "status": "connected",
-                                    "auth_method": list(alt_headers.keys())[0],
-                                }
-                            return response.json()
-                        except httpx.HTTPStatusError as alt_e:
-                            print(
-                                f"❌ Auth method {i+1} failed: Status {alt_e.response.status_code}"
-                            )
-                            continue
-
-                raise ObsidianAPIError(
-                    f"Failed to get vault info: {e.response.text}",
-                    e.response.status_code,
-                )
-            except Exception as e:
-                raise ObsidianAPIError(f"Connection error: {str(e)}")
+        return {
+            "name": self.corpus.vault_path.name or "Vault",
+            "path": self.vault_path,
+            "status": "connected" if os.path.isdir(self.vault_path) else "missing",
+        }
 
     async def health_check(self) -> bool:
-        """Check if Obsidian REST API is accessible"""
+        """Vault path is present and readable on disk."""
+        return os.path.isdir(self.vault_path)
+
+    def _sync_health(self) -> Dict[str, Any]:
+        """Sync freshness from obsidian-headless's per-vault sync.log mtime.
+
+        Same signal the staleness watchdog (scripts/obsidian-sync-watchdog.sh)
+        uses, read here so a stale vault is visible from inside an MCP
+        conversation too, not only from the cron alert. Best-effort: if
+        obsidian-headless isn't installed/configured (e.g. in tests, or on a
+        machine that doesn't sync), reports "configured": False rather than
+        erroring.
+        """
+        matches = glob.glob(
+            os.path.expanduser("~/.config/obsidian-headless/sync/*/sync.log")
+        )
+        if not matches:
+            return {"configured": False, "fresh": None, "age_seconds": None}
+
+        log_path = max(matches, key=os.path.getmtime)
         try:
-            await self.get_vault_info()
-            return True
-        except Exception:
-            return False
+            age_seconds = time.time() - os.path.getmtime(log_path)
+        except OSError:
+            return {"configured": True, "fresh": None, "age_seconds": None}
+
+        return {
+            "configured": True,
+            "fresh": age_seconds <= SYNC_STALE_THRESHOLD_SECONDS,
+            "age_seconds": round(age_seconds, 1),
+        }
 
     # =================== Note Reading Operations ===================
 
     async def read_note(self, path: str) -> str:
         """
-        Read note content by path
-
-        Args:
-            path: Note path relative to vault root (e.g., "Daily Notes/2024-01-01.md")
-
-        Returns:
-            Note content as string
+        Read note content by path (must be scope-prefixed, e.g. "work/foo.md").
+        Byte-for-byte parity with the old REST GET response.
         """
         if not path:
             raise ValueError("Note path cannot be empty")
-
-        # Ensure path doesn't start with /
-        path = path.lstrip("/")
-
+        scope, rel = _split_scope(path)
         try:
-            async with httpx.AsyncClient(verify=False) as client:
-                # URL encode the path to handle special characters
-                encoded_path = urllib.parse.quote(path, safe="/")
-                response = await client.get(
-                    f"{self.api_url}/vault/{encoded_path}",
-                    headers=self.headers,
-                    timeout=15.0,
-                )
-                response.raise_for_status()
-                return response.text
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise ObsidianAPIError(f"Note not found: {path}", 404)
-            raise ObsidianAPIError(
-                f"Failed to read note {path}: {e.response.text}", e.response.status_code
-            )
-        except Exception as e:
-            raise ObsidianAPIError(f"Connection error reading {path}: {str(e)}")
+            return self.corpus.read_text(scope, rel)
+        except FileNotFoundError:
+            raise ObsidianAPIError(f"Note not found: {path}", 404)
 
     async def get_note_metadata(self, path: str) -> NoteMetadata:
         """Get note metadata including size, dates, etc."""
+        scope, rel = _split_scope(path)
+        full = self.corpus.full_path(scope, rel)
         try:
-            # Get file list to find metadata
-            files = await self.list_files()
-
-            for file_info in files:
-                if file_info.get("path") == path:
-                    return NoteMetadata(
-                        path=file_info["path"],
-                        name=file_info["name"],
-                        size=file_info.get("stat", {}).get("size", 0),
-                        modified=datetime.fromtimestamp(
-                            file_info.get("stat", {}).get("mtime", 0) / 1000
-                        ),
-                        created=datetime.fromtimestamp(
-                            file_info.get("stat", {}).get("ctime", 0) / 1000
-                        )
-                        if file_info.get("stat", {}).get("ctime")
-                        else None,
-                    )
-
+            stat = full.stat()
+        except OSError:
             raise ObsidianAPIError(f"Note metadata not found: {path}", 404)
-        except Exception as e:
-            if isinstance(e, ObsidianAPIError):
-                raise
-            raise ObsidianAPIError(f"Failed to get note metadata: {str(e)}")
+        return NoteMetadata(
+            path=path,
+            name=full.name,
+            size=stat.st_size,
+            modified=datetime.fromtimestamp(stat.st_mtime),
+            created=datetime.fromtimestamp(stat.st_ctime),
+        )
 
     # =================== Note Writing Operations ===================
 
     async def create_note(
         self, path: str, content: str, create_folders: bool = True
     ) -> bool:
-        """
-        Create a new note
-
-        Args:
-            path: Note path relative to vault root
-            content: Note content
-            create_folders: Whether to create parent folders if they don't exist
-
-        Returns:
-            True if successful
-        """
+        """Create a new note. Raises 409 if it already exists."""
         if not path:
             raise ValueError("Note path cannot be empty")
-
-        # Ensure path doesn't start with /
-        path = path.lstrip("/")
-
-        # Check if note already exists
-        try:
-            await self.read_note(path)
-            raise ObsidianAPIError(f"Note already exists: {path}", 409)
-        except ObsidianAPIError as e:
-            if e.status_code != 404:  # If it's not "not found", re-raise
-                raise
-
-        return await self._write_note(path, content, create_folders)
+        scope, rel = _split_scope(path)
+        async with self.corpus.write_lock():
+            if self.corpus.note_exists(scope, rel):
+                raise ObsidianAPIError(f"Note already exists: {path}", 409)
+            try:
+                self.corpus.write_note(scope, rel, content, create_folders=create_folders)
+            except FileNotFoundError as e:
+                raise ObsidianAPIError(f"Failed to write note {path}: {e}", 404)
+        return True
 
     async def update_note(self, path: str, content: str) -> bool:
-        """
-        Update existing note content
-
-        Args:
-            path: Note path relative to vault root
-            content: New note content
-
-        Returns:
-            True if successful
-        """
+        """Overwrite an existing note's content. Raises 404 if it doesn't exist."""
         if not path:
             raise ValueError("Note path cannot be empty")
-
-        # Ensure note exists
-        await self.read_note(path)  # Will raise error if not found
-
-        return await self._write_note(path, content, create_folders=False)
+        scope, rel = _split_scope(path)
+        async with self.corpus.write_lock():
+            if not self.corpus.note_exists(scope, rel):
+                raise ObsidianAPIError(f"Note not found: {path}", 404)
+            self.corpus.write_note(scope, rel, content, create_folders=False)
+        return True
 
     async def append_note(
         self, path: str, content: str, separator: str = "\n\n"
     ) -> bool:
-        """
-        Append content to existing note
-
-        Args:
-            path: Note path relative to vault root
-            content: Content to append
-            separator: Separator between existing and new content
-
-        Returns:
-            True if successful
-        """
+        """Append content to an existing note (read-modify-write, lost-update guarded)."""
         if not path:
             raise ValueError("Note path cannot be empty")
-
-        # Read existing content
-        existing_content = await self.read_note(path)
-
-        # Append new content
-        new_content = existing_content + separator + content
-
-        return await self._write_note(path, new_content, create_folders=False)
+        scope, rel = _split_scope(path)
+        async with self.corpus.write_lock():
+            if not self.corpus.note_exists(scope, rel):
+                raise ObsidianAPIError(f"Note not found: {path}", 404)
+            try:
+                self.corpus.append_note(scope, rel, content, separator)
+            except ConcurrentModificationError:
+                raise ObsidianAPIError(
+                    f"Note {path} changed concurrently while appending; please retry", 409
+                )
+        return True
 
     async def delete_note(self, path: str) -> bool:
-        """
-        Delete a note
-
-        Args:
-            path: Note path relative to vault root
-
-        Returns:
-            True if successful
-        """
+        """Delete a note (moved to .trash/, not unlinked). Raises 404 if missing."""
         if not path:
             raise ValueError("Note path cannot be empty")
-
-        # Ensure path doesn't start with /
-        path = path.lstrip("/")
-
-        try:
-            async with httpx.AsyncClient(verify=False) as client:
-                encoded_path = urllib.parse.quote(path, safe="/")
-                response = await client.delete(
-                    f"{self.api_url}/vault/{encoded_path}",
-                    headers=self.headers,
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-                return True
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
+        scope, rel = _split_scope(path)
+        async with self.corpus.write_lock():
+            try:
+                self.corpus.delete_note(scope, rel)
+            except FileNotFoundError:
                 raise ObsidianAPIError(f"Note not found: {path}", 404)
-            raise ObsidianAPIError(
-                f"Failed to delete note {path}: {e.response.text}",
-                e.response.status_code,
-            )
-        except Exception as e:
-            raise ObsidianAPIError(f"Connection error deleting {path}: {str(e)}")
-
-    async def _write_note(
-        self, path: str, content: str, create_folders: bool = True
-    ) -> bool:
-        """Internal method to write note content"""
-        path = path.lstrip("/")
-
-        try:
-            async with httpx.AsyncClient(verify=False) as client:
-                encoded_path = urllib.parse.quote(path, safe="/")
-
-                # Prepare headers for plain text content
-                headers = self.headers.copy()
-                headers["Content-Type"] = "text/plain; charset=utf-8"
-
-                # Add query parameter for folder creation if needed
-                url = f"{self.api_url}/vault/{encoded_path}"
-                if create_folders:
-                    url += "?createDirectories=true"
-
-                response = await client.put(
-                    url,
-                    headers=headers,
-                    content=content.encode("utf-8"),
-                    timeout=15.0,
-                )
-                response.raise_for_status()
-                return True
-        except httpx.HTTPStatusError as e:
-            raise ObsidianAPIError(
-                f"Failed to write note {path}: {e.response.text}",
-                e.response.status_code,
-            )
-        except Exception as e:
-            raise ObsidianAPIError(f"Connection error writing {path}: {str(e)}")
-
-    # =================== Search Operations ===================
-
-    async def search_notes(
-        self, query: str, folder: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Search notes in vault with optional folder filtering
-
-        Args:
-            query: Search query string
-            folder: Optional folder to limit search scope
-
-        Returns:
-            List of search results with note paths and snippets
-        """
-        if not query.strip():
-            raise ValueError("Search query cannot be empty")
-
-        try:
-            async with httpx.AsyncClient(verify=False) as client:
-                search_data = {"query": query}
-                if folder:
-                    search_data["folder"] = folder.lstrip("/")
-
-                response = await client.post(
-                    f"{self.api_url}/search/simple/",
-                    headers=self.headers,
-                    json=search_data,
-                    timeout=15.0,
-                )
-                response.raise_for_status()
-
-                # Handle empty response from Obsidian API
-                if not response.content:
-                    return []  # Return empty results if API returns nothing
-
-                results = response.json()
-
-                # Enhance results with metadata if available
-                # Use concurrent fetching for better performance
-                async def fetch_metadata_for_result(result):
-                    enhanced_result = dict(result)
-                    try:
-                        # Add metadata if possible
-                        metadata = await self.get_note_metadata(result.get("path", ""))
-                        enhanced_result["metadata"] = {
-                            "size": metadata.size,
-                            "modified": metadata.modified.isoformat(),
-                            "created": metadata.created.isoformat()
-                            if metadata.created
-                            else None,
-                        }
-                    except Exception:
-                        # If metadata fails, continue without it
-                        pass
-                    return enhanced_result
-
-                # Fetch all metadata concurrently using asyncio.gather
-                # Use return_exceptions=True to handle individual failures gracefully
-                enhanced_results = await asyncio.gather(
-                    *[fetch_metadata_for_result(result) for result in results],
-                    return_exceptions=True
-                )
-
-                # Filter out any exceptions and return valid results
-                valid_results = [
-                    result for result in enhanced_results
-                    if not isinstance(result, Exception)
-                ]
-
-                return valid_results
-        except httpx.HTTPStatusError as e:
-            raise ObsidianAPIError(
-                f"Search failed: {e.response.text}", e.response.status_code
-            )
-        except Exception as e:
-            if isinstance(e, ObsidianAPIError):
-                raise
-            raise ObsidianAPIError(f"Search error: {str(e)}")
+        return True
 
     # =================== File and Folder Listing ===================
 
-    async def list_files(self, folder: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        List files in vault or specific folder
-
-        Note: This is a simplified implementation that works with available Obsidian REST API endpoints.
-        Since /files/ endpoint doesn't exist, we'll return folder structure from vault info.
-
-        Args:
-            folder: Optional folder path to list (None for all files)
-
-        Returns:
-            List of file information dictionaries
-        """
-        try:
-            # Get vault info to start with folder structure
-            vault_info = await self.get_vault_info()
-            files = []
-
-            # If we have folders in vault info, add them
-            if "files" in vault_info and isinstance(vault_info["files"], list):
-                # This contains folder names from vault root
-                for item in vault_info["files"]:
-                    if isinstance(item, str):
-                        # Add as folder
-                        files.append(
-                            {
-                                "path": item.rstrip("/"),
-                                "name": item.rstrip("/").split("/")[-1],
-                                "type": "folder",
-                                "size": 0,
-                            }
-                        )
-
-            # Filter by folder if specified
-            if folder:
-                folder = folder.strip("/")
-                filtered_files = []
-                for file in files:
-                    file_path = file.get("path", "")
-                    if (
-                        folder == ""
-                        or file_path.startswith(folder + "/")
-                        or file_path == folder
-                    ):
-                        filtered_files.append(file)
-                return filtered_files
-
-            return files
-
-        except Exception as e:
-            # Fallback: return empty list if we can't list files
-            print(f"Warning: Could not list files: {e}")
+    def _walk_markdown(self, root: Path) -> List[Path]:
+        """All .md files under root, skipping hidden dirs and node_modules."""
+        if not root.is_dir():
             return []
+        found: List[Path] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not _is_excluded((d,))]
+            for name in filenames:
+                if name.endswith(".md"):
+                    found.append(Path(dirpath) / name)
+        return found
+
+    def _note_metadata_for(self, file_path: Path, include_tags: bool) -> Optional[NoteMetadata]:
+        try:
+            rel_path = str(file_path.relative_to(self.corpus.vault_path)).replace(os.sep, "/")
+            stat = file_path.stat()
+            tags = None
+            if include_tags:
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")[:2000]
+                    tags = self._extract_tags(content)
+                except OSError:
+                    pass
+            return NoteMetadata(
+                path=rel_path,
+                name=file_path.name,
+                size=stat.st_size,
+                modified=datetime.fromtimestamp(stat.st_mtime),
+                created=datetime.fromtimestamp(stat.st_ctime),
+                tags=tags,
+            )
+        except OSError:
+            return None
 
     async def list_notes(self, folder: Optional[str] = None, include_tags: bool = False) -> List[NoteMetadata]:
         """
-        List notes with metadata
-
-        Args:
-            folder: Optional folder to filter by
-            include_tags: Whether to extract tags from notes (expensive - use only when needed)
-
-        Returns:
-            List of NoteMetadata objects
+        List notes with metadata under `folder` (scope-prefixed, e.g. "work" or
+        "work/entities"). Falls back to a full vault scan if folder is omitted.
         """
-        # Use filesystem discovery for better note detection
-        # By default, don't extract tags (lazy-loading optimization)
-        all_notes = self._discover_notes_filesystem(include_tags=include_tags, use_cache=True)
-
-        # Filter by folder if specified
-        if folder:
-            folder = folder.strip("/")
-            filtered_notes = []
-            for note in all_notes:
-                note_folder = os.path.dirname(note.path)
-                if note_folder == folder or note_folder.startswith(folder + "/"):
-                    filtered_notes.append(note)
-            return filtered_notes
-
-        return all_notes
+        root = Path(self.vault_path) / folder if folder else Path(self.vault_path)
+        notes = []
+        for file_path in self._walk_markdown(root):
+            note = self._note_metadata_for(file_path, include_tags)
+            if note:
+                notes.append(note)
+        return notes
 
     def _extract_tags(self, content: str) -> List[str]:
         """Extract tags from note content"""
         tags = set()
 
-        # Extract from frontmatter
         if content.startswith("---"):
             try:
                 end_idx = content.find("---", 3)
                 if end_idx > 0:
                     frontmatter = content[3:end_idx]
-                    # Simple tag extraction from frontmatter
                     for line in frontmatter.split("\n"):
                         if line.strip().startswith("tags:"):
                             tag_line = line.split(":", 1)[1].strip()
                             if tag_line.startswith("[") and tag_line.endswith("]"):
-                                # Array format: tags: [tag1, tag2]
                                 tag_list = tag_line[1:-1].split(",")
                                 tags.update(
                                     tag.strip().strip("\"'") for tag in tag_list
                                 )
                             else:
-                                # Simple format: tags: tag1, tag2
                                 tags.update(tag.strip() for tag in tag_line.split(","))
             except Exception:
                 pass
 
-        # Extract inline tags (#tag)
         inline_tags = re.findall(r"#([a-zA-Z0-9_/-]+)", content)
         tags.update(inline_tags)
 
@@ -655,169 +320,77 @@ class ObsidianClient:
 
     async def get_vault_structure(self, use_cache: bool = True, include_notes: bool = False) -> VaultStructure:
         """
-        Get vault structure with folders and optionally notes
+        Get vault structure with folders and optionally notes.
 
-        Args:
-            use_cache: Whether to use cached structure if available
-            include_notes: If False, only return folder structure without individual note metadata (default: False)
-
-        Returns:
-            VaultStructure object containing vault organization
+        `use_cache` is accepted for signature parity but unused: a plain
+        os.walk over an ~11MB vault is cheap enough that a separate TTL
+        cache layer on top of it isn't worth the complexity (VaultCorpus
+        already mtime-caches parsed note content).
         """
-        # Check cache
-        if use_cache and self._vault_structure_cache and self._cache_timestamp:
-            cache_age = (datetime.now() - self._cache_timestamp).total_seconds()
-            if cache_age < self._cache_ttl:
-                cached_structure = self._vault_structure_cache
-                # If notes not needed, return cached structure with empty notes list
-                if not include_notes:
-                    return VaultStructure(
-                        root_path=cached_structure.root_path,
-                        folders=cached_structure.folders,
-                        notes=[],
-                        total_notes=cached_structure.total_notes,
-                        total_folders=cached_structure.total_folders,
+        vault_root = Path(self.vault_path)
+        all_md_files = self._walk_markdown(vault_root)
+
+        folders: Dict[str, FolderInfo] = {}
+        notes: List[NoteMetadata] = []
+        note_paths = set()
+
+        for file_path in all_md_files:
+            rel_path = str(file_path.relative_to(vault_root)).replace(os.sep, "/")
+            note_paths.add(rel_path)
+
+            parent = file_path.parent
+            while parent != vault_root and parent != parent.parent:
+                folder_rel = str(parent.relative_to(vault_root)).replace(os.sep, "/")
+                if folder_rel and folder_rel not in folders:
+                    grandparent = parent.parent
+                    parent_rel = (
+                        str(grandparent.relative_to(vault_root)).replace(os.sep, "/")
+                        if grandparent != vault_root
+                        else None
                     )
-                return cached_structure
-
-        try:
-            # Get all files (folders from vault info)
-            all_files = await self.list_files()
-
-            # Separate folders and notes
-            folders = {}  # path -> FolderInfo
-            notes = []
-            note_paths = set()  # For lightweight counting when include_notes=False
+                    folders[folder_rel] = FolderInfo(
+                        path=folder_rel,
+                        name=parent.name,
+                        parent=parent_rel,
+                    )
+                parent = parent.parent
 
             if include_notes:
-                # Full discovery: discover all notes using filesystem scanning
-                # This is more reliable than the REST API for file discovery
-                # Don't include tags by default for better performance
-                filesystem_notes = self._discover_notes_filesystem(include_tags=False, use_cache=use_cache)
-                notes.extend(filesystem_notes)
-                note_paths.update(note.path for note in filesystem_notes)
-            else:
-                # Lightweight mode: just collect note paths for counting (no metadata)
-                # Use filesystem scan for accurate counting without loading metadata
-                if self.vault_path and os.path.exists(self.vault_path):
-                    try:
-                        md_pattern = os.path.join(self.vault_path, "**", "*.md")
-                        md_files = glob.glob(md_pattern, recursive=True)
-                        for file_path in md_files:
-                            rel_path = os.path.relpath(file_path, self.vault_path)
-                            rel_path = rel_path.replace(os.sep, "/")
-                            if ".obsidian" in rel_path.split("/"):
-                                continue
-                            note_paths.add(rel_path)
-                    except Exception:
-                        # Fallback to list_files if filesystem scan fails
-                        pass
+                note = self._note_metadata_for(file_path, include_tags=False)
+                if note:
+                    notes.append(note)
 
-            # Process files to build structure
-            for file_info in all_files:
-                file_path = file_info.get("path", "")
-                file_name = file_info.get("name", "")
-                file_type = file_info.get("type", "")
-
-                # Handle folders directly from vault info
-                if file_type == "folder":
-                    folders[file_path] = FolderInfo(
-                        path=file_path,
-                        name=file_name,
-                        parent=None,  # These are root-level folders
-                        notes_count=0,  # Will be updated later
-                        subfolders_count=0,  # Will be updated later
-                    )
-
-                    if include_notes:
-                        # Try to find some notes in this folder
-                        try:
-                            await self._discover_notes_in_folder(file_path, notes)
-                            note_paths.update(note.path for note in notes)
-                        except Exception:
-                            # Ignore errors in note discovery
-                            pass
-
-                # Handle notes (if we got any from file listings)
-                if file_path.endswith((".md", ".txt")):
-                    note_paths.add(file_path)
-                    if include_notes:
-                        try:
-                            stat = file_info.get("stat", {})
-                            note = NoteMetadata(
-                                path=file_path,
-                                name=file_name,
-                                size=stat.get("size", 0),
-                                modified=datetime.fromtimestamp(stat.get("mtime", 0) / 1000)
-                                if stat.get("mtime")
-                                else datetime.now(),
-                                created=datetime.fromtimestamp(stat.get("ctime", 0) / 1000)
-                                if stat.get("ctime")
-                                else None,
-                            )
-                            notes.append(note)
-                        except Exception:
-                            continue
-
-            # Recursive note count per folder (all .md under this path)
-            for folder_path, folder_info in folders.items():
-                folder_info.notes_count = sum(
-                    1
-                    for note_path in note_paths
-                    if note_path == folder_path
-                    or note_path.startswith(folder_path + "/")
-                )
-
-                # Count direct subfolders
-                folder_info.subfolders_count = sum(
-                    1
-                    for other_path in folders.keys()
-                    if other_path.startswith(folder_path + "/")
-                    and "/" not in other_path[len(folder_path) + 1 :]
-                )
-
-            # Calculate total notes count
-            total_notes = len(note_paths) if not include_notes else len(notes)
-
-            # Create vault structure
-            vault_info = await self.get_vault_info()
-            structure = VaultStructure(
-                root_path=vault_info.get("path", self.vault_path),
-                folders=list(folders.values()),
-                notes=notes,  # Empty list if include_notes=False
-                total_notes=total_notes,
-                total_folders=len(folders),
+        for folder_path, folder_info in folders.items():
+            folder_info.notes_count = sum(
+                1
+                for note_path in note_paths
+                if note_path == folder_path or note_path.startswith(folder_path + "/")
+            )
+            folder_info.subfolders_count = sum(
+                1
+                for other_path in folders.keys()
+                if other_path.startswith(folder_path + "/")
+                and "/" not in other_path[len(folder_path) + 1 :]
             )
 
-            # Cache the result (only cache if include_notes=True to avoid caching incomplete data)
-            if include_notes:
-                self._vault_structure_cache = structure
-                self._cache_timestamp = datetime.now()
+        total_notes = len(note_paths)
 
-            return structure
-
-        except Exception as e:
-            if isinstance(e, ObsidianAPIError):
-                raise
-            raise ObsidianAPIError(f"Failed to get vault structure: {str(e)}")
+        structure = VaultStructure(
+            root_path=self.vault_path,
+            folders=list(folders.values()),
+            notes=notes,
+            total_notes=total_notes,
+            total_folders=len(folders),
+        )
+        return structure
 
     async def get_folder_contents(self, folder_path: str) -> Dict[str, Any]:
-        """
-        Get contents of a specific folder
-
-        Args:
-            folder_path: Path to folder
-
-        Returns:
-            Dictionary with folder contents and metadata
-        """
+        """Get contents of a specific folder"""
         folder_path = folder_path.strip("/")
 
         try:
-            # Need notes for folder contents, so use include_notes=True
             structure = await self.get_vault_structure(include_notes=True)
 
-            # Find the folder
             folder_info = None
             for folder in structure.folders:
                 if folder.path == folder_path:
@@ -827,7 +400,6 @@ class ObsidianClient:
             if not folder_info and folder_path != "":
                 raise ObsidianAPIError(f"Folder not found: {folder_path}", 404)
 
-            # Get notes in this folder
             folder_notes = [
                 note
                 for note in structure.notes
@@ -839,7 +411,6 @@ class ObsidianClient:
                 )
             ]
 
-            # Get subfolders
             subfolders = [
                 folder for folder in structure.folders if folder.parent == folder_path
             ]
@@ -860,52 +431,8 @@ class ObsidianClient:
             raise ObsidianAPIError(f"Failed to get folder contents: {str(e)}")
 
     def invalidate_cache(self):
-        """Invalidate the vault structure cache and filesystem cache"""
-        self._vault_structure_cache = None
-        self._cache_timestamp = None
-        self._filesystem_notes_cache = None
-        self._filesystem_cache_timestamp = None
-
-    # =================== Obsidian Command Execution ===================
-
-    async def execute_command(self, command: str, **kwargs) -> Dict[str, Any]:
-        """
-        Execute Obsidian command via REST API
-
-        Args:
-            command: Command name to execute
-            **kwargs: Command parameters
-
-        Returns:
-            Command execution result
-        """
-        if not command:
-            raise ValueError("Command cannot be empty")
-
-        try:
-            async with httpx.AsyncClient(verify=False) as client:
-                command_data = {"command": command, "parameters": kwargs}
-
-                response = await client.post(
-                    f"{self.api_url}/command/",
-                    headers=self.headers,
-                    json=command_data,
-                    timeout=15.0,
-                )
-                response.raise_for_status()
-
-                # Some commands might not return JSON
-                try:
-                    return response.json()
-                except Exception:
-                    return {"result": response.text, "success": True}
-
-        except httpx.HTTPStatusError as e:
-            raise ObsidianAPIError(
-                f"Command execution failed: {e.response.text}", e.response.status_code
-            )
-        except Exception as e:
-            raise ObsidianAPIError(f"Connection error executing command: {str(e)}")
+        """Invalidate the shared corpus mtime cache."""
+        self.corpus.clear_cache()
 
     # =================== Utility Methods ===================
 
@@ -913,37 +440,24 @@ class ObsidianClient:
         """Normalize file path for consistent handling"""
         if not path:
             return ""
-
-        # Remove leading/trailing slashes and whitespace
         path = path.strip(" /")
-
-        # Ensure .md extension for notes
         if path and not path.endswith((".md", ".txt")):
             path += ".md"
-
         return path
 
     async def note_exists(self, path: str) -> bool:
         """Check if a note exists"""
-        try:
-            await self.read_note(path)
-            return True
-        except ObsidianAPIError as e:
-            if e.status_code == 404:
-                return False
-            raise
+        scope, rel = _split_scope(path)
+        return self.corpus.note_exists(scope, rel)
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get vault statistics"""
         try:
-            # Need notes for stats, so use include_notes=True
             structure = await self.get_vault_structure(include_notes=True)
             vault_info = await self.get_vault_info()
 
-            # Calculate additional stats
             total_size = sum(note.size for note in structure.notes)
 
-            # Find largest and most recent notes
             largest_note = (
                 max(structure.notes, key=lambda n: n.size) if structure.notes else None
             )
@@ -969,53 +483,11 @@ class ObsidianClient:
                 }
                 if most_recent
                 else None,
-                "api_url": self.api_url,
                 "api_connected": await self.health_check(),
+                "sync": self._sync_health(),
             }
 
         except Exception as e:
             if isinstance(e, ObsidianAPIError):
                 raise
             raise ObsidianAPIError(f"Failed to get vault stats: {str(e)}")
-
-    async def _discover_notes_in_folder(
-        self, folder_path: str, notes_list: List[NoteMetadata]
-    ):
-        """
-        Helper method to discover notes in a folder using available endpoints
-        """
-        try:
-            # Try some common note patterns in the folder
-            common_patterns = [
-                "README.md",
-                "index.md",
-                "notes.md",
-                "daily.md",
-                "weekly.md",
-                "template.md",
-                "inbox.md",
-                "todo.md",
-            ]
-
-            for pattern in common_patterns:
-                test_path = f"{folder_path}/{pattern}"
-                try:
-                    # Try to read the note to see if it exists
-                    content = await self.read_note(test_path)
-                    # If successful, create metadata and add to list
-                    note = NoteMetadata(
-                        path=test_path,
-                        name=pattern,
-                        size=len(content),
-                        modified=datetime.now(),  # We don't have real metadata
-                        created=None,
-                        tags=self.extract_tags(content) if content else [],
-                    )
-                    notes_list.append(note)
-                except:
-                    # File doesn't exist, continue
-                    pass
-
-        except Exception:
-            # Ignore discovery errors
-            pass

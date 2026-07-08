@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.scope import active_scopes_for_read, get_effective_workspace_context
 
@@ -144,8 +144,14 @@ def _value_matches(actual: Any, expected: Any) -> bool:
 class VaultIntelligenceTools:
     """Structured vault retrieval tools backed by live parse + mtime cache."""
 
-    def __init__(self, vault_path: str):
-        self.corpus = VaultCorpus(vault_path)
+    def __init__(self, vault_path_or_corpus: Union[str, VaultCorpus]):
+        """Accepts a vault path (builds its own corpus) or a shared VaultCorpus
+        (e.g. from ObsidianTools, so writes via ObsidianClient are immediately
+        visible here through the same mtime cache)."""
+        if isinstance(vault_path_or_corpus, VaultCorpus):
+            self.corpus = vault_path_or_corpus
+        else:
+            self.corpus = VaultCorpus(vault_path_or_corpus)
 
     def _resolve_scopes(self, scope: Optional[str]) -> List[str]:
         ctx = get_effective_workspace_context()

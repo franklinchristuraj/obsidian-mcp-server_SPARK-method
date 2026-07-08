@@ -2,6 +2,7 @@
 Obsidian MCP Tools Implementation
 Workspace-scoped vault tools using ObsidianClient
 """
+import functools
 import json
 import os
 import re
@@ -19,10 +20,27 @@ from src.scope import (
     scoped_list_folder,
     strip_scope_prefix,
 )
+from src.vault_intelligence.corpus import VaultCorpus
 from src.vault_intelligence.tools import VaultIntelligenceTools
 from src.vault_intelligence.parser import EVENT_TYPES, required_fm_for
 from ..types import MCPTool
 from ..utils.list_notes_time import note_mtime_in_window, resolve_list_notes_time_window
+
+
+def _write_locked(method):
+    """Holds the corpus's coarse write lock for the method's whole body.
+
+    Reentrant per asyncio task, so a multi-step flow (create_event calling
+    self.create_note(), then reading and updating backref entity notes) can
+    nest without deadlocking - see VaultCorpus.write_lock().
+    """
+
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        async with self._get_vault_intel().corpus.write_lock():
+            return await method(self, *args, **kwargs)
+
+    return wrapper
 
 
 def _entity_write_warnings(rel_path: str, content: str) -> List[str]:
@@ -169,28 +187,48 @@ class ObsidianTools:
     """Workspace-scoped Obsidian MCP tools."""
 
     def __init__(self):
+        vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
+        # Shared corpus: writes via ObsidianClient invalidate the same mtime
+        # cache VaultIntelligenceTools reads from, so a write is immediately
+        # visible to resolve_entity/query_frontmatter/etc. without a second scan.
+        self._corpus: Optional[VaultCorpus] = VaultCorpus(vault_path) if vault_path else None
+        self._corpus_by_path: Dict[str, VaultCorpus] = (
+            {vault_path: self._corpus} if self._corpus else {}
+        )
         self.client = None
         self._vault_intel: Optional[VaultIntelligenceTools] = None
         self._initialize_client()
 
+    def _corpus_for_path(self, vault_path: str) -> VaultCorpus:
+        corpus = self._corpus_by_path.get(vault_path)
+        if corpus is None:
+            corpus = VaultCorpus(vault_path)
+            self._corpus_by_path[vault_path] = corpus
+        return corpus
+
     def _get_vault_intel(self) -> VaultIntelligenceTools:
-        if self._vault_intel is None:
-            vault_path = ""
-            if self.client:
-                vault_path = self.client.vault_path
-            if not vault_path:
-                vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
+        # Prefer the live client's own corpus (production: this is self._corpus,
+        # shared so a write via ObsidianClient is immediately visible here).
+        # Tests swap self.client for a fake/mock exposing only .vault_path after
+        # construction; route those through the same per-path corpus cache so
+        # repeated calls in one test still reuse the mtime cache.
+        corpus = getattr(self.client, "corpus", None) if self.client else None
+        if corpus is None:
+            vault_path = getattr(self.client, "vault_path", "") if self.client else ""
+            vault_path = vault_path or os.getenv("OBSIDIAN_VAULT_PATH", "")
             if not vault_path:
                 raise ValueError("OBSIDIAN_VAULT_PATH not configured")
-            self._vault_intel = VaultIntelligenceTools(vault_path)
+            corpus = self._corpus_for_path(vault_path)
+        if self._vault_intel is None or self._vault_intel.corpus is not corpus:
+            self._vault_intel = VaultIntelligenceTools(corpus)
         return self._vault_intel
 
     def _initialize_client(self):
         """Initialize ObsidianClient with error handling"""
         try:
-            self.client = ObsidianClient()
+            self.client = ObsidianClient(corpus=self._corpus)
         except ValueError as e:
-            # Client will be None if API key is not set
+            # Client will be None if OBSIDIAN_VAULT_PATH is not set
             print(f"Warning: ObsidianClient not initialized: {e}")
             self.client = None
 
@@ -725,7 +763,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     async def read_note(self, path: str, scope: Optional[str] = None) -> Dict[str, Any]:
         """Read note; path is relative to workspace. Resolves scope if omitted."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         ctx = get_effective_workspace_context()
         allow = tuple(ctx.allowed_scopes)
@@ -790,6 +828,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 raise ValueError("Note not found") from e
             raise ValueError(f"Failed to read note: {e.message}") from e
 
+    @_write_locked
     async def create_note(
         self,
         path: str,
@@ -801,7 +840,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Create a note under a workspace; templates load from that workspace."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         try:
             from ..utils.template_utils import read_vault_template, template_detector
@@ -1083,6 +1122,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         except Exception as e:
             raise ValueError(f"Unexpected error creating note: {str(e)}")
 
+    @_write_locked
     async def update_note(
         self,
         path: str,
@@ -1092,7 +1132,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Update note content (scoped)."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         try:
             from ..utils.template_utils import template_detector
@@ -1198,6 +1238,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         except Exception as e:
             raise ValueError(f"Unexpected error updating note: {str(e)}")
 
+    @_write_locked
     async def append_note(
         self,
         path: str,
@@ -1207,7 +1248,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Append to a note (scoped)."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         try:
             full_path, rel_path, write_scope = self._resolve_note_path_for_write(
@@ -1245,10 +1286,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         except Exception as e:
             raise ValueError(f"Unexpected error appending to note: {str(e)}")
 
+    @_write_locked
     async def delete_note(self, path: str, scope: Optional[str] = None) -> Dict[str, Any]:
         """Delete a note (scoped)."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         try:
             full_path, rel_path, write_scope = self._resolve_note_path_for_write(
@@ -1292,7 +1334,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """List notes under allowed workspace roots (optional folder, scope, mtime filters)."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         if limit is not None and limit < 0:
             raise ValueError("limit must be >= 0")
@@ -1406,7 +1448,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Folder tree with note counts, limited to allowed workspaces."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         ctx = get_effective_workspace_context()
         allow = tuple(ctx.allowed_scopes)
@@ -1549,7 +1591,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Return whether the note exists; disambiguates across workspaces."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         ctx = get_effective_workspace_context()
         allow = tuple(ctx.allowed_scopes)
@@ -1605,7 +1647,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Daily notes in range, tagged by workspace; deduplicated by (scope, date)."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         ctx = get_effective_workspace_context()
         allow = tuple(ctx.allowed_scopes)
@@ -1737,6 +1779,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
     # =================== Tool Dispatcher ===================
 
+    @_write_locked
     async def capture_seed(
         self,
         title: str = "",
@@ -1758,7 +1801,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         promoted into a scope at weekly triage.
         """
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         try:
             import re as _re
@@ -1911,6 +1954,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         except Exception as e:
             raise ValueError(f"Unexpected error writing capture: {str(e)}")
 
+    @_write_locked
     async def create_event(
         self,
         event_type: str,
@@ -1929,7 +1973,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         """Create a schema-valid event entity card and (optionally) its back-refs."""
         if not self.client:
-            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_API_KEY.")
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
 
         HOME_ORGS = {"make", "make-company", "celonis", "celonis-company"}
 

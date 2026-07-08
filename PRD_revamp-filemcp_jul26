@@ -1,0 +1,148 @@
+# PRD v2: Retire the Obsidian desktop-in-a-container in favor of headless sync + a filesystem-native MCP server
+
+**Status:** Approved for execution.
+**Changes from v1:** External REST consumers confirmed none (audit closed). Added permanent backup layer (Phase 0.5), canonical vault path decision, sync health monitoring, lost-update mitigation, trash-based deletes, and a sync-visibility test. Resolved the `ob login` open question (non-interactive flags exist). Added the headless client's SQLite state file as a named risk.
+
+## 1. Background / why this exists
+
+Franklin originally needed two things from the Obsidian setup on this VPS: **cross-device sync** (Obsidian Sync) and **programmatic access** for an MCP server so Claude could read/write notes. At the time, the only way to get both from one running process was to run the actual Obsidian desktop app and point the MCP server at its "Local REST API" community plugin. Since Obsidian's desktop app is Electron with no native headless mode, that meant running a full virtual desktop in Docker (`lscr.io/linuxserver/obsidian`, KasmVNC-based: Xvfb + openbox + pulseaudio + nginx + selkies WebRTC streaming) purely to keep one plugin's HTTP server alive.
+
+This PRD decouples the two jobs into two lighter, independent pieces.
+
+## 2. Current state (verified, not assumed)
+
+**RAM cost, measured directly (`docker stats`):**
+- `obsidian` container: **1.018 GiB** (13% of the box's 7.8 GiB). Xvfb alone is ~575 MB, the rest spread across ~6 Obsidian/Electron helper processes. `selkies`, `openbox`, `pulseaudio`, `nginx` add a further ~85 MB combined.
+- `nginx-proxy-manager` + `npm-db`: ~232 MB combined. Unrelated to Obsidian, load-bearing for the public `mcp.ziksaka.com` route. Untouched by this plan.
+- System total: 2.3 GiB used of 7.8 GiB. No memory pressure today; this is about reclaiming capacity for other projects.
+
+**What the container does today:** runs Obsidian Sync and serves the Local REST API plugin on port 27123, which the MCP server calls over HTTP.
+
+**REST API consumers (audited and confirmed):** the MCP server is the **only** consumer of port 27123. Nothing else (Make scenarios, SPARK pipelines, nightly agents) calls the Local REST API directly; all vault automation routes through the MCP server. Confirmed by Franklin 2026-07-08. Phase 3's port closure is therefore safe.
+
+**MCP server architecture:**
+The codebase at `/home/franklinchris/obsidian-mcp-server/` is already a hybrid:
+- `src/vault_intelligence/` (`corpus.py`, `parser.py`, `tools.py`) already reads notes **directly off disk**, no HTTP. It implements `resolve_entity`, `query_frontmatter`, `get_dossier`, `lint_vault`, and `search_notes_ranked` via a `VaultCorpus` class: an mtime-keyed in-process cache over `pathlib`/`rglob` scans, with a hand-rolled frontmatter parser (regex + `yaml.safe_load`).
+- `src/clients/obsidian_client.py` (`ObsidianClient`) is the **only** REST-dependent piece: `httpx.AsyncClient` calls to `{OBSIDIAN_API_URL}/vault/{path}` (GET/PUT/DELETE), `/search/simple/` (POST), `/command/`, bearer-token auth. This backs the CRUD tools in `src/tools/obsidian_tools.py`.
+  - `ObsidianClient._discover_notes_filesystem` already bypasses REST for note discovery via `glob`. Existing precedent that direct filesystem access works.
+- `src/scope.py` implements the personal/work/passion routing (`resolve_scoped_path`, path-traversal guards). One vault, three subfolders. Unchanged by this plan.
+- Vault path today: `/home/franklinchris/obsidian/config/franklin-vault/` (inside the container's `config` bind-mount). **631 markdown files, 11 MB total.** Small enough that mtime-cached in-memory scanning is comfortably fast; no full-text index needed.
+- systemd unit `~/.config/systemd/user/obsidian-mcp.service` has no dependency on Docker (`After=network.target` only).
+- **No write-locking exists anywhere in the codebase today.** Currently invisible because the Obsidian app process serializes all writes through the REST plugin.
+- A prior design doc (`docs/multi-vault-implementation-guide.md`, March 2026) proposed a filesystem-first rewrite with SQLite FTS5. It is unbuilt and factually stale (wrong vault layout, wrong HTTP library, assumed a sync tool that did not yet exist). This PRD supersedes it. Treat as historical context, not a spec.
+
+## 3. Problem statement
+
+Running a full Electron+VNC desktop 24/7 on a headless server, purely so one plugin's HTTP endpoint stays up, is disproportionate to what's needed: a background sync process and a way for a Python script to read/write markdown files. ~1 GB of permanently committed RAM is the cost of that mismatch.
+
+A second, subtler problem introduced by fixing the first: today, sync and API are one process. If it dies, MCP calls fail loudly and Franklin notices within hours. After decoupling, the MCP server can happily serve a **stale** vault while the sync daemon is dead. Sync failure becomes silent by default. This PRD treats sync observability as a first-class requirement, not an afterthought.
+
+## 4. Goal
+
+Eliminate the Obsidian Electron/VNC container entirely, replacing it with two independent, minimal pieces:
+1. A headless sync daemon (`obsidian-headless`) keeping the vault in sync with Obsidian's cloud service. No GUI, no display.
+2. An MCP server that reads/writes vault files directly on disk. No HTTP intermediary, no dependency on any Obsidian process.
+
+Plus one new piece that the old architecture provided implicitly and this one must provide explicitly:
+3. **Sync health monitoring** so a dead or stalled sync daemon is detected within minutes, not days.
+
+**Non-goals:** changing the MCP tool surface Claude sees (tool names/signatures unaffected), changing Franklin's phone/desktop Obsidian workflow (only the server side changes), building the full FTS5/multi-vault-config system from the old design doc.
+
+## 5. Sync side: `obsidian-headless` (updated facts, July 2026)
+
+**Recommended: `obsidian-headless`** (official CLI, `github.com/obsidianmd/obsidian-headless`, still in open beta). Key facts, several updated since v1:
+
+- `npm install -g obsidian-headless`, Node 22+.
+- **Login supports non-interactive flags:** `ob login [--email <email>] [--password <password>] [--mfa <code>]`. The v1 open question about headless auth is resolved. No workstation browser dance needed.
+- `ob sync-list-remote` lists remote vaults; useful to confirm the vault name before `sync-setup`.
+- `ob sync-setup --vault "<name>"` runs from inside the local vault directory.
+- `ob sync --continuous` watches for changes. `ob sync` alone does a one-time pass.
+- **`ob sync-status` exists:** shows sync status and configuration for a vault. This is the backbone of the monitoring requirement (goal #3).
+- **Three sync modes now exist:** bidirectional (default), pull-only, mirror-remote. This plan uses **bidirectional**, since the MCP server writes to the vault and those writes must propagate to phone/desktop.
+- Same end-to-end encryption as desktop Sync, same paid subscription.
+- **New named risk:** the client tracks sync state in a local SQLite file. Community reports document a failure mode where a lost or corrupted state file can cause the client to push **deletions** to the remote vault. Mitigation is the permanent backup layer in Phase 0.5, not hope.
+
+**Fallbacks (unchanged from v1):** Syncthing (drops official Sync, re-provision every device), self-hosted LiveSync + CouchDB (third-party bridges), DIY bare Xvfb + Electron (~220-320 MB, still Electron for no reason). All strictly worse while `obsidian-headless` works.
+
+## 6. Proposed solution
+
+### Phase 0 — Backup & baseline (no risk)
+- `tar czf ~/franklin-vault-backup-$(date +%Y%m%d-%H%M).tar.gz -C /home/franklinchris/obsidian/config franklin-vault`
+- Baseline RAM already recorded: 1.018 GiB.
+
+### Phase 0.5 — Permanent, sync-independent backup (new, stays forever)
+Once beta software becomes the guardian of the canonical server copy, a one-time tarball is not enough. The vault is 11 MB; versioned backups are essentially free.
+- Initialize a git repo in the vault (or a bare mirror if `.git` inside the vault causes friction with Sync; verify Sync ignores it, which it does by default for hidden folders per vault sync settings).
+- Cron: nightly `git add -A && git commit -m "auto: $(date -Iseconds)"` plus a weekly push to a private remote (or a restic snapshot to off-box storage, Franklin's choice).
+- This survives every failure mode below: headless client state corruption, sync-pushed deletions, MCP write bugs, fat-fingered `rm`.
+- **Acceptance:** a file deleted from the vault can be recovered from last night's commit.
+
+### Phase 1 — Stand up `obsidian-headless`, container untouched
+
+**Step 1a: decide the canonical vault path now, not later.** `/home/franklinchris/obsidian/config/franklin-vault/` is container-bind-mount archaeology. Re-pointing sync after the fact is a second risky migration. Instead:
+- New canonical path: `/home/franklinchris/vaults/franklin-vault/`.
+- Copy (not move) the vault there. The container keeps syncing the old path as a live fallback; headless syncs the new path. Two sync clients on one account is exactly how multiple devices already work.
+
+**Step 1b: install and connect.**
+- `npm install -g obsidian-headless` (pin the version in a note; it's beta, updates should be deliberate, not automatic).
+- `ob login --email ... --password ... --mfa ...`, then `ob sync-list-remote` to confirm the exact remote vault name.
+- **`ob sync-setup` against a populated folder remains the single highest-uncertainty step.** Unknown whether it merges, needs an empty target, or has a link-existing mode. Mitigation unchanged: check `--help` first; if ambiguous, dry-run against a throwaway copy and diff before touching the canonical copy. Rollback: Phase 0 tarball + the untouched old path.
+
+**Step 1c: run as a monitored service.**
+- systemd user unit `obsidian-headless.service` running `ob sync --continuous`, with `Restart=always` and `RestartSec=10`.
+- **Staleness watchdog (new):** a small script on a 5-minute cron (or systemd timer) that runs `ob sync-status`, parses the last-sync indicator, and alerts (ntfy/email/whatever Franklin already uses) if sync is stalled beyond a threshold (e.g. 30 minutes) or the service is inactive. Restart=always handles crashes; the watchdog handles the worse case, a process that is alive but not syncing.
+
+**Step 1d: verify.**
+- Phone edit lands in the new path via headless sync alone.
+- File-manifest (path+mtime) diff before/after a quiet period shows no unexpected divergence between old path (container sync) and new path (headless sync).
+- No `.obsidian` corruption or sync-conflict files.
+- Confirm vault sync settings (images/attachments/config subset) carried over correctly on the headless side.
+- Measure the daemon's actual RAM.
+- Kill the daemon manually; confirm systemd restarts it and the watchdog would have fired.
+
+Container is **not** decommissioned. It stays as a live fallback until Phase 2 is verified.
+
+### Phase 2 — Filesystem-native MCP server
+
+Reuse-first: extend `VaultCorpus` with write operations, and rewrite `ObsidianClient` to delegate to it internally, keeping public method names/signatures unchanged so `src/tools/obsidian_tools.py` needs no changes. This explicitly rejects the old design doc's parallel `VaultClient` hierarchy.
+
+- `corpus.py`: add `write_note` (atomic: temp file in the **same directory** + `os.replace()`, then refresh the cache entry), `delete_note`, `append_note` (read-modify-write, lock-protected), `note_exists`.
+- **Delete semantics (new):** `delete_note` moves the file to `franklin-vault/.trash/` (creating it if absent) instead of `os.remove()`. This matches the Obsidian app's default behavior and buys recoverability for free. Handle name collisions in `.trash` with a timestamp suffix.
+- **Lost-update guard (new):** the lock serializes the MCP server against itself, and `os.replace()` prevents torn writes, but neither prevents this race: MCP reads a note, sync pulls a phone edit of the same note, MCP writes back and clobbers the phone edit. Cheap mitigation: `write_note` and `append_note` stat the file's mtime at read time and re-check immediately before `os.replace()`; if it changed, re-read and retry once, then fail loudly rather than silently overwrite. Coarse, but turns a silent data-loss window into a visible error for the rare case it fires.
+- `obsidian_client.py`: drop the `OBSIDIAN_API_KEY` requirement and all `httpx`/REST calls; own a `VaultCorpus`; split incoming `"scope/rel"` paths and delegate CRUD to the corpus; `read_note` reads raw file text directly (byte-for-byte parity with today's REST responses); reimplement folder/stat enumeration via `os.walk`/`corpus.load_scope`.
+- **`health_check` (expanded):** now reports two things: (1) `vault_path` is readable, and (2) sync freshness via `ob sync-status` (or the watchdog's last-known state), so a stale vault is visible from inside an MCP conversation, not only from the cron alert.
+- **Drop `execute_command` and `search_notes`:** confirmed unused by any current tool, and no external consumers exist (Section 2 audit, closed). Intentional capability removal, signed off.
+- Unify the mtime cache: `VaultIntelligenceTools.__init__` accepts a shared corpus instance so a write via one code path is immediately visible to the other.
+- **Locking:** single coarse-grained `fcntl.flock` on `franklin-vault/.mcp-write.lock`, held for each write-tool-call's read-modify-write sequence (including the multi-step `capture_seed`/`create_event` flows around `obsidian_tools.py` ~lines 2040-2066). Global, not per-file: single-user contention is negligible and this avoids stale-lock cleanup logic. It serializes the MCP server's own concurrent calls; protection against the sync process comes from atomic `os.replace()` plus the lost-update guard above.
+- Config: point `OBSIDIAN_VAULT_PATH` at the new canonical path; drop `OBSIDIAN_API_URL`/`OBSIDIAN_API_KEY` from `.env` once verified; keep `httpx` in `requirements.txt` (used by test/diagnostic scripts); update `check_setup.py`, `scripts/diagnose_obsidian.py`, `scripts/create_mock_server.py`, and the three REST-mocking test files (`test_obsidian_client.py`, `test_obsidian_tools.py`, `test_setup.py`) to a tmp-filesystem-vault fixture.
+
+**Verify (container still up but unused, safe A/B window):**
+- Full CRUD round-trip via MCP tools cross-checked against phone edits and vice versa.
+- **Sync-visibility test (new):** an MCP write via `os.replace()` must appear on the phone within normal sync latency. Rename-based atomic writes and file watchers occasionally disagree; this proves the continuous-sync watcher picks up the MCP's write pattern. If it doesn't, fallback is touch-after-replace or a short polling sync interval.
+- Delete via MCP lands in `.trash`, not oblivion.
+- `resolve_entity`/`query_frontmatter`/`get_dossier`/`lint_vault`/search all still correct (regression on the shared-cache change).
+- Concurrency burst test: rapid MCP writes racing a simulated sync write show no corruption, and the lost-update guard fires correctly when forced.
+- Test suite passes.
+
+### Phase 3 — Decommission
+- `docker compose -f compose/obsidian/docker-compose.yml down`; archive (don't delete) the compose file for one release cycle. Keep the old vault path frozen for the same cycle, then remove.
+- Close firewall ports 3000, 3001 immediately; close 27123 once `.env` cleanup confirms nothing references it. (External-consumer audit already closed: MCP server was the only caller.)
+- Confirm `nginx-proxy-manager` unaffected (already audited: no entries for these ports, only `mcp.ziksaka.com`).
+- Record final RAM vs. 1.018 GiB baseline.
+
+## 7. Key risks (updated)
+
+1. **`ob sync-setup` against a populated folder is unverified behavior.** Mitigation: dry-run on a throwaway copy + Phase 0 tarball + the untouched old path as live fallback. Highest-uncertainty step in the plan.
+2. **Headless client SQLite state file.** Documented community failure mode: corrupted/lost state can push deletions remotely. Mitigation: Phase 0.5 permanent versioned backups, plus the frozen old-path copy through the A/B window.
+3. **Silent sync failure is the new default failure mode of a decoupled architecture.** Mitigation: Restart=always, staleness watchdog, and sync freshness surfaced in `health_check`. Treat the watchdog as a launch blocker, not a nice-to-have.
+4. **Lost-update race between MCP writes and sync pulls.** Window is tiny for a single user; the mtime re-check turns the rare hit into a visible error instead of silent data loss. Accepted.
+5. **Locking is intentionally coarse and best-effort.** Appropriate for a single-user vault. Revisit if concurrent usage grows (e.g. multiple agents writing on schedules).
+6. **`obsidian-headless` is still open beta.** Official and verified, but beta. Pin the installed version; update deliberately, reading release notes, not via blind `npm update -g`.
+
+## 8. Success metrics
+- Container RAM (1.018 GiB) reclaimed; `obsidian-headless` daemon expected well under 320 MB (no Electron at all).
+- All existing MCP tools behave identically from Claude's perspective, with no REST/Obsidian-app dependency at runtime.
+- Sync latency between phone/desktop and VPS comparable to today.
+- **A dead or stalled sync daemon is detected within 30 minutes** (watchdog alert) and visible via `health_check`.
+- **Any vault file is recoverable from a nightly snapshot** independent of Obsidian Sync.
+- No data loss or corruption at any phase.

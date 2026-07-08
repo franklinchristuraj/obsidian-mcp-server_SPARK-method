@@ -201,14 +201,25 @@ class MCPProtocolHandler:
 
         # Execute the tool
         if tool_name == "ping":
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Pong! Tool called successfully at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-                    }
-                ]
-            }
+            text = f"Pong! Tool called successfully at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
+            try:
+                from .tools.obsidian_tools import obsidian_tools
+
+                client = obsidian_tools.client
+                if client is not None:
+                    vault_ok = await client.health_check()
+                    sync = client._sync_health()
+                    text += f"\nVault path readable: {vault_ok}"
+                    if sync["configured"]:
+                        text += (
+                            f"\nSync: {'fresh' if sync['fresh'] else 'STALE'} "
+                            f"(last write {sync['age_seconds']:.0f}s ago)"
+                        )
+                    else:
+                        text += "\nSync: obsidian-headless not configured on this host"
+            except Exception:
+                pass
+            return {"content": [{"type": "text", "text": text}]}
 
         try:
             from .tools.obsidian_tools import OBSIDIAN_ROUTED_TOOL_NAMES, obsidian_tools

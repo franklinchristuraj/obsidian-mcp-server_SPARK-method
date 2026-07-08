@@ -1,89 +1,84 @@
 #!/usr/bin/env python3
 """
-Comprehensive Obsidian REST API Diagnostic Script
-"""
-import subprocess
-import socket
-import sys
+Vault + MCP Server Diagnostic Script (filesystem-native architecture)
 
-def check_port_listening(port):
-    """Check if a port is listening"""
+Replaces the old REST API / port-scanning diagnostic - there's no Obsidian
+plugin or port to check anymore, just: is the vault path readable, and is
+the MCP server listening.
+"""
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def check_port_listening(port: int) -> bool:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
-        result = sock.connect_ex(('127.0.0.1', port))
+        result = sock.connect_ex(("127.0.0.1", port))
         sock.close()
         return result == 0
-    except:
+    except Exception:
         return False
 
-def run_command(cmd):
-    """Run a shell command and return output"""
+
+def run_command(cmd: str):
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         return result.stdout.strip(), result.stderr.strip(), result.returncode
-    except:
+    except Exception:
         return "", "Command failed", 1
 
+
 def main():
-    print("🔍 Obsidian REST API Diagnostic Report")
+    print("🔍 Obsidian MCP Server Diagnostic Report")
     print("=" * 50)
-    
-    # Check if port 36961 is listening
-    print("\n📡 Port Status Check:")
-    if check_port_listening(36961):
-        print("✅ Port 36961 is accepting connections")
+
+    vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
+    print("\n📁 Vault Path Check:")
+    if not vault_path:
+        print("❌ OBSIDIAN_VAULT_PATH not set")
+    elif not os.path.isdir(vault_path):
+        print(f"❌ Vault path does not exist: {vault_path}")
     else:
-        print("❌ Port 36961 is NOT listening")
-    
-    # Check for any processes on common Obsidian ports
-    print("\n🔍 Scanning for services on common ports:")
-    common_ports = [36961, 27123, 8080, 3000, 8000, 8081]
-    for port in common_ports:
-        if check_port_listening(port):
-            print(f"✅ Service found on port {port}")
-        else:
-            print(f"❌ No service on port {port}")
-    
-    # Check for Obsidian processes
-    print("\n🔍 Looking for Obsidian processes:")
-    stdout, stderr, code = run_command("ps aux | grep -i obsidian | grep -v grep")
-    if stdout:
-        print("✅ Found Obsidian processes:")
-        for line in stdout.split('\n'):
-            if line.strip():
-                print(f"   {line}")
+        print(f"✅ Vault path readable: {vault_path}")
+        for scope in ("personal", "passion", "work"):
+            scope_dir = Path(vault_path) / scope
+            count = len(list(scope_dir.rglob("*.md"))) if scope_dir.is_dir() else 0
+            status = "✅" if scope_dir.is_dir() else "❌"
+            print(f"   {status} {scope}/: {count} notes")
+
+    mcp_port = int(os.getenv("MCP_PORT", "8888"))
+    print(f"\n📡 MCP Server Port Check ({mcp_port}):")
+    if check_port_listening(mcp_port):
+        print(f"✅ Port {mcp_port} is accepting connections")
     else:
-        print("❌ No Obsidian processes found")
-    
-    # Check listening ports
-    print("\n🔍 All listening ports:")
-    stdout, stderr, code = run_command("ss -tuln | grep LISTEN | head -10")
-    if stdout:
-        print("Current listening ports:")
-        for line in stdout.split('\n'):
-            if line.strip():
-                print(f"   {line}")
-    
-    # Final recommendation
+        print(f"❌ Port {mcp_port} is NOT listening")
+
+    print("\n🔍 obsidian-mcp systemd service:")
+    stdout, _, _ = run_command(
+        "systemctl --user is-active obsidian-mcp.service 2>/dev/null"
+    )
+    print(f"   status: {stdout or 'unknown'}")
+
     print("\n" + "=" * 50)
     print("📋 DIAGNOSIS SUMMARY:")
-    
-    if check_port_listening(36961):
-        print("✅ Obsidian REST API appears to be running")
-        print("🔧 Next steps:")
-        print("   1. Test with: curl http://127.0.0.1:36961/vault/")
-        print("   2. Set OBSIDIAN_API_KEY environment variable if needed")
-        print("   3. Run: python test_obsidian_api.py")
+    if vault_path and os.path.isdir(vault_path) and check_port_listening(mcp_port):
+        print("✅ Vault is readable and MCP server is listening")
     else:
-        print("❌ Obsidian REST API is NOT running")
-        print("🔧 Required steps:")
-        print("   1. Install Obsidian desktop application")
-        print("   2. Install 'REST API' community plugin")
-        print("   3. Enable the plugin in Settings > Community Plugins")
-        print("   4. Configure plugin settings (port, API key)")
-        print("   5. Restart Obsidian")
-        print("\n📖 See setup_obsidian_api.md for detailed instructions")
+        print("❌ Something's misconfigured - check the sections above")
+        print("🔧 Next steps:")
+        print("   1. Verify OBSIDIAN_VAULT_PATH in .env")
+        print("   2. Check: systemctl --user status obsidian-mcp.service")
+        print("   3. Check logs: journalctl --user -u obsidian-mcp.service -n 50")
+
 
 if __name__ == "__main__":
     main()

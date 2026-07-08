@@ -18,30 +18,29 @@ async def verify_setup():
         "MCP_HOST",
         "MCP_PORT",
         "MCP_API_KEY",
-        "OBSIDIAN_API_URL",
-        "OBSIDIAN_API_KEY",
+        "OBSIDIAN_VAULT_PATH",
     ]
 
     for var in required_vars:
         value = os.getenv(var)
         if value:
-            masked = value[:8] + "..." if len(value) > 8 else "***"
+            masked = value[:8] + "..." if "KEY" in var and len(value) > 8 else value
             print(f"  • {var}: {masked}")
         else:
             print(f"  ✗ {var}: MISSING")
             sys.exit(1)
 
-    # Test Obsidian connection
-    print("\n✓ Testing Obsidian Connection:")
+    # Test vault access (filesystem-native - no REST API/plugin dependency)
+    print("\n✓ Testing Vault Access:")
     client = ObsidianClient()
 
     if await client.health_check():
-        print("  • Obsidian REST API: Connected")
+        print("  • Vault path: Readable")
         info = await client.get_vault_info()
         print(f"  • Vault Name: {info.get('name', 'Unknown')}")
     else:
-        print("  ✗ Cannot connect to Obsidian REST API")
-        print("  Make sure Obsidian is running with Local REST API plugin enabled")
+        print("  ✗ Cannot read OBSIDIAN_VAULT_PATH")
+        print("  Check that the path exists and is readable")
         sys.exit(1)
 
     print("\n✅ Setup verification complete!")
