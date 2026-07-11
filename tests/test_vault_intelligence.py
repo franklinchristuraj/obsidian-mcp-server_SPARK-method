@@ -319,6 +319,141 @@ class TestEventEntitySupport(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("julien", broken)
 
 
+CARLOS_QUIROS_MD = """---
+type: entity
+entity_type: person
+created: 2026-01-01
+agent_context: "Carlos Quiros, VE org."
+tags:
+  - entity
+  - person
+---
+
+# Carlos Quiros
+"""
+
+STALE_LINK_MD = """---
+type: entity
+entity_type: customer
+created: 2026-01-01
+agent_context: "Some note with a stale link."
+tags:
+  - entity
+  - customer
+---
+
+# Some Note
+
+## Connections
+- [[entities/internal-stakeholder/carlos-quiros]] - contact
+"""
+
+ACME_CUSTOMER_MD = """---
+type: entity
+entity_type: customer
+created: 2026-01-01
+agent_context: "Acme the customer."
+tags:
+  - entity
+  - customer
+---
+
+# Acme Customer
+"""
+
+ACME_COMPANY_MD = """---
+type: entity
+entity_type: company
+created: 2026-01-01
+agent_context: "Acme the company."
+tags:
+  - entity
+  - company
+---
+
+# Acme Company
+"""
+
+AMBIGUOUS_LINK_MD = """---
+type: entity
+entity_type: customer
+created: 2026-01-01
+agent_context: "Mentions the ambiguous acme stem."
+tags:
+  - entity
+  - customer
+---
+
+# Mentions Acme
+
+## Connections
+- [[acme]] - related
+"""
+
+
+class TestLintVaultFix(unittest.IsolatedAsyncioTestCase):
+    """lint_vault(fix=True): rewrite unambiguous stale links, leave ambiguous ones alone."""
+
+    async def asyncSetUp(self) -> None:
+        from src.vault_intelligence.tools import VaultIntelligenceTools
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        ent = root / "work" / "entities"
+        (ent / "person").mkdir(parents=True)
+        (ent / "customer").mkdir(parents=True)
+        (ent / "company").mkdir(parents=True)
+        (ent / "person" / "carlos-quiros.md").write_text(CARLOS_QUIROS_MD, encoding="utf-8")
+        (ent / "customer" / "some-note.md").write_text(STALE_LINK_MD, encoding="utf-8")
+        (ent / "customer" / "acme.md").write_text(ACME_CUSTOMER_MD, encoding="utf-8")
+        (ent / "company" / "acme.md").write_text(ACME_COMPANY_MD, encoding="utf-8")
+        (ent / "customer" / "mentions-acme.md").write_text(AMBIGUOUS_LINK_MD, encoding="utf-8")
+        self.root = root
+        self.tools = VaultIntelligenceTools(str(root))
+
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_baseline_reports_both_broken_links(self) -> None:
+        result = await self.tools.lint_vault(scope="work", folder="entities")
+        data = json.loads(result["content"][0]["text"])
+        broken = {b["link"] for b in data["broken_wikilinks"]}
+        self.assertIn("entities/internal-stakeholder/carlos-quiros", broken)
+        self.assertIn("acme", broken)
+
+    async def test_fix_rewrites_stale_full_path_link(self) -> None:
+        result = await self.tools.lint_vault(scope="work", folder="entities", fix=True)
+        data = json.loads(result["content"][0]["text"])
+        fix_report = data["fix_report"]
+
+        rewritten_links = {r["link"] for r in fix_report["rewritten"]}
+        self.assertIn("entities/internal-stakeholder/carlos-quiros", rewritten_links)
+
+        on_disk = (self.root / "work/entities/customer/some-note.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[[carlos-quiros]]", on_disk)
+        self.assertNotIn("entities/internal-stakeholder/carlos-quiros", on_disk)
+
+    async def test_fix_leaves_ambiguous_link_unrewritten(self) -> None:
+        result = await self.tools.lint_vault(scope="work", folder="entities", fix=True)
+        data = json.loads(result["content"][0]["text"])
+        fix_report = data["fix_report"]
+
+        ambiguous_links = {r["link"] for r in fix_report["still_ambiguous"]}
+        self.assertIn("acme", ambiguous_links)
+
+        on_disk = (self.root / "work/entities/customer/mentions-acme.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[[acme]]", on_disk)
+
+        # Post-fix rescan: the stale-path link is gone, the ambiguous one remains.
+        broken = {b["link"] for b in data["broken_wikilinks"]}
+        self.assertNotIn("entities/internal-stakeholder/carlos-quiros", broken)
+        self.assertIn("acme", broken)
+
+
 class _FakeObsidianClient:
     """Filesystem-backed stand-in for ObsidianClient (REST) in create_event tests."""
 
@@ -439,6 +574,102 @@ class TestCreateEventTool(unittest.IsolatedAsyncioTestCase):
         names = sorted(p.name for p in events_dir.glob("*.md"))
         self.assertIn("2026-06-01-claroty-discovery-call.md", names)
         self.assertIn("2026-06-01-claroty-discovery-call-2.md", names)
+
+
+class TestWriteTimeValidation(unittest.IsolatedAsyncioTestCase):
+    """Alias-collision blocking + unresolved-link warnings on create_note/update_note."""
+
+    async def asyncSetUp(self) -> None:
+        from src.tools.obsidian_tools import ObsidianTools
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        ent = root / "work" / "entities"
+        (ent / "customer").mkdir(parents=True)
+        (ent / "person").mkdir(parents=True)
+        (ent / "customer" / "claroty.md").write_text(CLAROTY_MD, encoding="utf-8")
+        (ent / "person" / "julien.md").write_text(JULIEN_MD, encoding="utf-8")
+
+        self.tools = ObsidianTools()
+        self.tools.client = _FakeObsidianClient(str(root))
+        self.tools._vault_intel = None
+        self.root = root
+
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_new_alias_colliding_with_another_entity_blocks_update(self) -> None:
+        new_content = JULIEN_MD.replace(
+            'aliases: ["Julien Martin"]', 'aliases: ["Julien Martin", "Claroty Inc"]'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            await self.tools.update_note(
+                path="entities/person/julien.md", content=new_content, scope="work"
+            )
+        self.assertIn("alias collision", str(ctx.exception))
+
+        # The write must not have happened.
+        on_disk = (self.root / "work/entities/person/julien.md").read_text(encoding="utf-8")
+        self.assertNotIn("Claroty Inc", on_disk)
+
+    async def test_unchanged_alias_does_not_block_update(self) -> None:
+        new_content = JULIEN_MD.replace(
+            "Julien is the Claroty champion.",
+            "Julien is the Claroty champion (updated).",
+        )
+        result = await self.tools.update_note(
+            path="entities/person/julien.md", content=new_content, scope="work"
+        )
+        self.assertIn("Successfully updated", result["content"][0]["text"])
+
+    async def test_unresolved_outgoing_link_surfaces_warning(self) -> None:
+        content = (
+            "---\n"
+            "type: entity\n"
+            "entity_type: person\n"
+            "created: 2026-01-01\n"
+            'agent_context: "A new contact."\n'
+            "tags:\n  - entity\n  - person\n"
+            "aliases: []\n"
+            "---\n\n"
+            "# New Contact\n\n"
+            "## Connections\n"
+            "- [[nobody-known]] - related\n"
+        )
+        result = await self.tools.create_note(
+            path="entities/person/new-contact.md",
+            content=content,
+            scope="work",
+            use_template=False,
+        )
+        warnings = result["metadata"]["validation_warnings"]
+        joined = " ".join(warnings)
+        self.assertIn("unresolved outgoing wikilinks", joined)
+        self.assertIn("nobody-known", joined)
+
+    async def test_resolvable_outgoing_link_has_no_warning(self) -> None:
+        content = (
+            "---\n"
+            "type: entity\n"
+            "entity_type: person\n"
+            "created: 2026-01-01\n"
+            'agent_context: "Another contact."\n'
+            "tags:\n  - entity\n  - person\n"
+            "aliases: []\n"
+            "---\n\n"
+            "# Another Contact\n\n"
+            "## Connections\n"
+            "- [[claroty]] - customer\n"
+        )
+        result = await self.tools.create_note(
+            path="entities/person/another-contact.md",
+            content=content,
+            scope="work",
+            use_template=False,
+        )
+        warnings = result["metadata"]["validation_warnings"]
+        joined = " ".join(warnings)
+        self.assertNotIn("unresolved outgoing wikilinks", joined)
 
 
 class TestToolRegistry(unittest.TestCase):

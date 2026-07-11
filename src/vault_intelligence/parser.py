@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -267,6 +267,54 @@ def extract_source_history_entries(note: ParsedNote) -> List[dict]:
         entries.append({"date": match.group(1), "text": rest, "links": links})
     entries.sort(key=lambda e: e["date"], reverse=True)
     return entries
+
+
+def extract_all_wikilink_targets(content: str) -> List[str]:
+    """All distinct wikilink targets across raw text (frontmatter + body),
+    normalized. Unlike parse_note's outlinks (which scan frontmatter and body
+    separately then merge), this runs one pass over unparsed content — used by
+    write-time validation, which checks a note's links before it exists as a
+    ParsedNote in the corpus.
+    """
+    targets: List[str] = []
+    seen: set = set()
+    for match in WIKILINK_RE.finditer(content):
+        target = normalize_link_target(match.group(1))
+        if target and target not in seen:
+            seen.add(target)
+            targets.append(target)
+    return targets
+
+
+def rewrite_wikilinks(content: str, rewrites: Dict[str, str]) -> Tuple[str, int]:
+    """Rewrite ``[[old]]`` / ``[[old|display]]`` wikilinks to a canonical stem.
+
+    ``rewrites`` maps normalized old link targets (as produced by
+    normalize_link_target, matching what ``ParsedNote.outlinks`` holds) to
+    their new canonical stems. One text-level regex pass covers both
+    frontmatter and body; ``|display`` text is preserved untouched. Used by
+    lint_vault(fix=True) to batch all rewrites for one file into a single
+    read-modify-write. Returns (new_content, count_rewritten).
+    """
+    if not rewrites:
+        return content, 0
+    count = 0
+
+    def _sub(match: re.Match) -> str:
+        nonlocal count
+        raw_target = match.group(1)
+        display = match.group(2)
+        key = normalize_link_target(raw_target)
+        new_target = rewrites.get(key)
+        if new_target is None:
+            return match.group(0)
+        count += 1
+        if display is not None:
+            return f"[[{new_target}|{display}]]"
+        return f"[[{new_target}]]"
+
+    new_content = WIKILINK_RE.sub(_sub, content)
+    return new_content, count
 
 
 def link_matches_target(link: str, canonical_path: str) -> bool:

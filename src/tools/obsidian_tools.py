@@ -21,8 +21,15 @@ from src.scope import (
     strip_scope_prefix,
 )
 from src.vault_intelligence.corpus import VaultCorpus
+from src.vault_intelligence.entity_index import EntityIndex
 from src.vault_intelligence.tools import VaultIntelligenceTools
-from src.vault_intelligence.parser import EVENT_TYPES, required_fm_for
+from src.vault_intelligence.parser import (
+    EVENT_TYPES,
+    ParsedNote,
+    extract_all_wikilink_targets,
+    normalize_path_key,
+    required_fm_for,
+)
 from ..types import MCPTool
 from ..utils.list_notes_time import note_mtime_in_window, resolve_list_notes_time_window
 
@@ -43,11 +50,17 @@ def _write_locked(method):
     return wrapper
 
 
-def _entity_write_warnings(rel_path: str, content: str) -> List[str]:
+def _entity_write_warnings(
+    rel_path: str, content: str, entity_index: Optional[EntityIndex] = None
+) -> List[str]:
     """Non-blocking advisories for entity-card writes (schema + event vocab).
 
     Mirrors lint_vault's checks at write time so drift is caught at the source.
     Returns an empty list for non-entity notes or notes without entity_type.
+    When ``entity_index`` is given (a snapshot of the vault taken just before
+    this write), also flags outgoing wikilinks that don't resolve — same
+    check lint_vault reports, surfaced immediately instead of at the next
+    lint run.
     """
     if "entities/" not in rel_path:
         return []
@@ -74,7 +87,63 @@ def _entity_write_warnings(rel_path: str, content: str) -> List[str]:
                 f"event_type '{event_type}' is not in the controlled vocabulary "
                 f"{sorted(EVENT_TYPES)}"
             )
+    if entity_index is not None:
+        unresolved = sorted(
+            {
+                link
+                for link in extract_all_wikilink_targets(content)
+                if entity_index.resolve_bare_or_path(link) is None
+            }
+        )
+        if unresolved:
+            warnings.append(f"unresolved outgoing wikilinks: {unresolved}")
     return warnings
+
+
+def _check_alias_collisions(
+    rel_path: str, content: str, entities: List[ParsedNote]
+) -> None:
+    """Blocks a write iff a newly declared alias collides with a DIFFERENT
+    existing entity's alias.
+
+    Diffs against the note's own pre-write on-disk aliases (looked up in
+    ``entities`` by path, empty for a brand-new note) so only genuinely *new*
+    collisions block the write — a known baseline collision, or an unrelated
+    edit to either side of it, is left alone. Only applies to entities/ paths.
+    """
+    if "entities/" not in rel_path:
+        return
+    from ..utils.template_utils import template_detector
+
+    fm, _ = template_detector.extract_frontmatter(content)
+    if not fm:
+        return
+    raw_aliases = fm.get("aliases") or []
+    if isinstance(raw_aliases, list):
+        new_aliases = {str(a).strip().lower() for a in raw_aliases if str(a).strip()}
+    else:
+        new_aliases = {str(raw_aliases).strip().lower()} if raw_aliases else set()
+    if not new_aliases:
+        return
+
+    own_key = normalize_path_key(rel_path)
+    own_prior = next(
+        (e for e in entities if normalize_path_key(e.path) == own_key), None
+    )
+    prior_aliases = set(own_prior.aliases) if own_prior else set()
+    newly_declared = new_aliases - prior_aliases
+    if not newly_declared:
+        return
+
+    for entity in entities:
+        if normalize_path_key(entity.path) == own_key:
+            continue
+        collided = newly_declared & set(entity.aliases)
+        if collided:
+            raise ValueError(
+                f"alias collision: {sorted(collided)} already used by "
+                f"{entity.path} — choose a different alias or resolve the conflict first"
+            )
 
 
 _EVENT_LINE_DATE_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})")
@@ -1062,6 +1131,14 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "and template_vars keys."
                 )
 
+            entity_index: Optional[EntityIndex] = None
+            if "entities/" in path:
+                vi = self._get_vault_intel()
+                all_notes = vi.corpus.load_scope([write_scope], include_sections=False)
+                entities = [n for n in all_notes if n.path.startswith("entities/")]
+                _check_alias_collisions(path, final_content, entities)
+                entity_index = EntityIndex(all_notes)
+
             success = await self.client.create_note(full_path, final_content, create_folders)
 
             if success:
@@ -1082,7 +1159,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 if path_was_normalized:
                     path_info = f"\n📍 Path normalized: {original_path} → {path}"
 
-                warnings = _entity_write_warnings(path, final_content)
+                warnings = _entity_write_warnings(path, final_content, entity_index)
                 warning_info = ""
                 if warnings:
                     warning_info = "\n⚠️  " + "\n⚠️  ".join(warnings)
@@ -1193,6 +1270,14 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 except Exception:
                     pass
 
+            entity_index: Optional[EntityIndex] = None
+            if "entities/" in rel_path:
+                vi = self._get_vault_intel()
+                all_notes = vi.corpus.load_scope([write_scope], include_sections=False)
+                entities = [n for n in all_notes if n.path.startswith("entities/")]
+                _check_alias_collisions(rel_path, final_content, entities)
+                entity_index = EntityIndex(all_notes)
+
             success = await self.client.update_note(full_path, final_content)
 
             if success:
@@ -1200,7 +1285,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     f"\n🔒 Preserved existing format" if format_preserved else ""
                 )
 
-                warnings = _entity_write_warnings(rel_path, final_content)
+                warnings = _entity_write_warnings(rel_path, final_content, entity_index)
                 warning_info = ""
                 if warnings:
                     warning_info = "\n⚠️  " + "\n⚠️  ".join(warnings)
@@ -1767,6 +1852,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         return await self._get_vault_intel().get_dossier(name, scope=scope, depth=depth)
 
+    @_write_locked
     async def lint_vault(
         self,
         scope: Optional[str] = None,

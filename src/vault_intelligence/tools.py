@@ -5,13 +5,13 @@ import json
 import logging
 import re
 from datetime import datetime
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.scope import active_scopes_for_read, get_effective_workspace_context
 
-from .corpus import VaultCorpus
+from .corpus import ConcurrentModificationError, VaultCorpus
+from .entity_index import EntityIndex, match_entities
 from .parser import (
     CONNECTIONS_HEADING,
     EVENT_TYPES,
@@ -22,6 +22,7 @@ from .parser import (
     link_matches_target,
     normalize_path_key,
     required_fm_for,
+    rewrite_wikilinks,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,22 +45,6 @@ CAP_CONNECTIONS = 20
 CAP_BACKLINKS = 20
 CAP_QUERY_RESULTS = 50
 CAP_DOSSIER_MENTIONS = 5
-FUZZY_MAX_DISTANCE = 3
-FUZZY_MIN_RATIO = 0.72
-
-
-def _levenshtein(a: str, b: str) -> int:
-    if len(a) < len(b):
-        return _levenshtein(b, a)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        curr = [i]
-        for j, cb in enumerate(b, 1):
-            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = curr
-    return prev[-1]
 
 
 def _json_result(payload: Any) -> Dict[str, Any]:
@@ -180,69 +165,6 @@ class VaultIntelligenceTools:
             self._resolve_scopes(scope), folder=folder, include_sections=include_sections
         )
 
-    def _kebab_stem(self, path: str) -> str:
-        name = Path(path).stem.lower()
-        return name
-
-    def _match_entities(
-        self, name: str, entities: List[Any]
-    ) -> Tuple[Optional[Any], List[dict]]:
-        """Resolution: filename → alias → fuzzy. Returns (match, disambiguation)."""
-        query = name.strip()
-        if not query:
-            raise ValueError("name cannot be empty")
-
-        query_lower = query.lower()
-        query_kebab = re.sub(r"[^a-z0-9]+", "-", query_lower).strip("-")
-
-        # 1. Exact filename stem
-        exact = [e for e in entities if self._kebab_stem(e.path) == query_kebab]
-        if len(exact) == 1:
-            return exact[0], []
-        if len(exact) > 1:
-            return None, [{"path": e.path, "entity_type": e.entity_type} for e in exact]
-
-        # 2. Alias match (case-insensitive)
-        alias_hits = []
-        for e in entities:
-            if query_lower in e.aliases:
-                alias_hits.append(e)
-        if len(alias_hits) == 1:
-            return alias_hits[0], []
-        if len(alias_hits) > 1:
-            return None, [{"path": e.path, "entity_type": e.entity_type, "match": "alias"} for e in alias_hits]
-
-        # 3. Fuzzy over filename stem AND aliases (best score per entity)
-        fuzzy: List[Tuple[float, Any]] = []
-        for e in entities:
-            candidates = [self._kebab_stem(e.path)]
-            candidates.extend(
-                re.sub(r"[^a-z0-9]+", "-", a.lower()).strip("-") for a in e.aliases
-            )
-            best: Optional[float] = None
-            for cand in candidates:
-                if not cand:
-                    continue
-                if query_kebab in cand or cand in query_kebab:
-                    best = max(best or 0.0, 0.9)
-                    continue
-                dist = _levenshtein(query_kebab, cand)
-                ratio = SequenceMatcher(None, query_kebab, cand).ratio()
-                if dist <= FUZZY_MAX_DISTANCE or ratio >= FUZZY_MIN_RATIO:
-                    best = max(best or 0.0, ratio)
-            if best is not None:
-                fuzzy.append((best, e))
-
-        fuzzy.sort(key=lambda x: x[0], reverse=True)
-        if not fuzzy:
-            return None, []
-
-        top_ratio = fuzzy[0][0]
-        top = [e for r, e in fuzzy if r >= top_ratio - 0.05]
-        if len(top) == 1:
-            return top[0], []
-        return None, [{"path": e.path, "entity_type": e.entity_type, "match": "fuzzy"} for e in top[:5]]
-
     def _resolve_link(
         self,
         link: str,
@@ -353,7 +275,7 @@ class VaultIntelligenceTools:
         if not entities:
             raise ValueError("No entity cards found in scope")
 
-        match, disambiguation = self._match_entities(name, entities)
+        match, disambiguation = match_entities(name, entities)
         if disambiguation:
             payload = {
                 "disambiguation_required": True,
@@ -561,9 +483,6 @@ class VaultIntelligenceTools:
         folder: Optional[str] = None,
         fix: bool = False,
     ) -> Dict[str, Any]:
-        if fix:
-            raise ValueError("fix=True is not implemented yet; run with fix=False (default)")
-
         notes = self._all_notes(scope, folder=folder or "entities")
         notes_by_key = self.corpus.index_by_path(notes)
         # Resolve bare links against the full scope corpus, not just the linted
@@ -639,7 +558,71 @@ class VaultIntelligenceTools:
             "orphan_entities": orphans[:50],
             "alias_collisions": alias_collisions[:20],
         }
-        return _json_result(payload)
+
+        if not fix:
+            return _json_result(payload)
+
+        # --- fix mode: rewrite what can be rewritten unambiguously ---
+        entity_index = EntityIndex(corpus_notes)
+        per_note_rewrites: Dict[str, Dict[str, str]] = {}
+        rewritten_entries: List[dict] = []
+        still_ambiguous: List[dict] = []
+        still_unresolvable: List[dict] = []
+
+        for entry in broken_links:
+            link = entry["link"]
+            status, target_path = entity_index.classify_link(link)
+            if status == "resolved":
+                canonical_stem = Path(target_path).stem
+                per_note_rewrites.setdefault(entry["source"], {})[link] = canonical_stem
+                rewritten_entries.append({**entry, "rewritten_to": canonical_stem})
+            elif status == "ambiguous":
+                still_ambiguous.append(entry)
+            else:
+                still_unresolvable.append(entry)
+
+        write_errors: List[dict] = []
+        async with self.corpus.write_lock():
+            for source_path, rewrites in per_note_rewrites.items():
+                note = notes_by_key.get(normalize_path_key(source_path))
+                if note is None:
+                    continue
+                try:
+                    current_text = self.corpus.read_text(note.scope, note.path)
+                    mtime = self.corpus.stat_mtime(note.scope, note.path)
+                    new_text, n = rewrite_wikilinks(current_text, rewrites)
+                    if n:
+                        self.corpus.write_note(
+                            note.scope,
+                            note.path,
+                            new_text,
+                            create_folders=False,
+                            expected_mtime=mtime,
+                        )
+                except ConcurrentModificationError:
+                    write_errors.append(
+                        {
+                            "path": source_path,
+                            "error": "concurrent modification; retry lint_vault(fix=True)",
+                        }
+                    )
+                except OSError as e:
+                    write_errors.append({"path": source_path, "error": str(e)})
+
+        # Re-scan post-fix so the returned summary/broken_wikilinks reflect the
+        # actual on-disk state, not the pre-fix snapshot.
+        rescanned = await self.lint_vault(scope=scope, folder=folder, fix=False)
+        rescanned_payload = json.loads(rescanned["content"][0]["text"])
+        rescanned_payload["fix_report"] = {
+            "rewritten": rewritten_entries,
+            "rewritten_count": len(rewritten_entries),
+            "still_ambiguous": still_ambiguous,
+            "still_ambiguous_count": len(still_ambiguous),
+            "still_unresolvable": still_unresolvable,
+            "still_unresolvable_count": len(still_unresolvable),
+            "write_errors": write_errors,
+        }
+        return _json_result(rescanned_payload)
 
     async def search_notes_ranked(
         self,

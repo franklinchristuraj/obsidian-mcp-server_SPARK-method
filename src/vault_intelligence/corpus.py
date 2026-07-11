@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .entity_index import build_name_index
 from .parser import ParsedNote, normalize_path_key, parse_note
 
 
@@ -111,26 +112,11 @@ class VaultCorpus:
         resolution) instead of full-path links. This index lets the intelligence
         tools resolve those to canonical ``entities/...`` paths. Keys that collide
         across two different notes are dropped so a bare link never resolves to an
-        ambiguous target.
+        ambiguous target. Delegates to entity_index.build_name_index, the single
+        source of truth for this resolution rule; see there for the full
+        ambiguity-drop rationale and for the sibling EntityIndex used at write time.
         """
-        idx: Dict[str, ParsedNote] = {}
-        ambiguous: set = set()
-
-        def _add(key: str, note: ParsedNote) -> None:
-            k = key.strip().lower()
-            if not k or k in ambiguous:
-                return
-            existing = idx.get(k)
-            if existing is not None and existing.path != note.path:
-                del idx[k]
-                ambiguous.add(k)
-                return
-            idx[k] = note
-
-        for note in notes:
-            _add(Path(note.path).stem, note)
-            for alias in note.aliases:
-                _add(alias, note)
+        idx, _ambiguous = build_name_index(notes)
         return idx
 
     def vault_file_exists(self, scope: str, workspace_rel: str) -> bool:
