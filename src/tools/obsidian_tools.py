@@ -249,6 +249,8 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "get_neighbors": "get_neighbors",
     "find_path": "find_path",
     "graph_health": "graph_health",
+    "timeline": "timeline",
+    "last_touch": "last_touch",
     "capture": "capture_seed",
     "create_event": "create_event",
 }
@@ -639,6 +641,14 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "description": "Connection hop depth (default 1)",
                         "default": 1,
                     },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "Optional YYYY-MM-DD. When set, adds a `changes_since` block "
+                            "(events + mentions on/after this date) without altering the rest "
+                            "of the response. E.g. \"what's changed since our last call\"."
+                        ),
+                    },
                 },
                 ["name"],
             ),
@@ -734,6 +744,46 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 ),
                 {"scope": sr},
                 [],
+            ),
+            _tool(
+                "timeline",
+                (
+                    "Ordered interaction history for an entity: events (from its ## Events "
+                    "back-refs), dated Source History mentions across the corpus, and "
+                    "last_updated timestamps on connected/backlinked notes. Optional start/end "
+                    "(YYYY-MM-DD) to scope the range. Use scope=work."
+                ),
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Entity name, alias, or partial filename (same fuzzy resolution as resolve_entity)",
+                    },
+                    "scope": sr,
+                    "start": {
+                        "type": "string",
+                        "description": "Optional inclusive start date (YYYY-MM-DD)",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "Optional inclusive end date (YYYY-MM-DD)",
+                    },
+                },
+                ["name"],
+            ),
+            _tool(
+                "last_touch",
+                (
+                    "Most recent interaction with an entity (latest timeline item) — "
+                    "for \"what's gone quiet\" queries. Use scope=work."
+                ),
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Entity name, alias, or partial filename (same fuzzy resolution as resolve_entity)",
+                    },
+                    "scope": sr,
+                },
+                ["name"],
             ),
             _tool(
                 "capture",
@@ -1924,8 +1974,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         name: str,
         scope: Optional[str] = None,
         depth: int = 1,
+        since: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return await self._get_vault_intel().get_dossier(name, scope=scope, depth=depth)
+        return await self._get_vault_intel().get_dossier(
+            name, scope=scope, depth=depth, since=since
+        )
 
     @_write_locked
     async def lint_vault(
@@ -1962,6 +2015,22 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
     async def graph_health(self, scope: Optional[str] = None) -> Dict[str, Any]:
         return await self._get_vault_intel().graph_health(scope=scope)
+
+    async def timeline(
+        self,
+        name: str,
+        scope: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().timeline(
+            name, scope=scope, start=start, end=end
+        )
+
+    async def last_touch(
+        self, name: str, scope: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().last_touch(name, scope=scope)
 
     # =================== Tool Dispatcher ===================
 

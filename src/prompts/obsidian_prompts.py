@@ -175,12 +175,14 @@ Event entities use **bare** links (`[[claroty]]`, `[[2026-05-01-claroty-discover
 |------|------|-------------------|
 | Look up customer, person, partner, concept, event by name or alias | **`resolve_entity`** | `name` (fuzzy/alias OK, e.g. `Gojab` → GoJob); `scope=work`. Returns path, `agent_context`, connections (with target context), backlinks, `events` list, recent Source History. **One call replaces many search/read cycles.** |
 | Filter by frontmatter (live, not index files) | **`query_frontmatter`** | `filters` object, AND semantics, e.g. `{entity_type: customer, poc_stage: discovery}` or `{entity_type: event, event_type: discovery-call}`; optional `folder`, `tag`; `scope=work`. Returns path + `agent_context` only (max 50). |
-| Meeting prep / stakeholder brief | **`get_dossier`** | `name` (same as resolve_entity); `scope=work`. Wraps resolve_entity + open questions + cross-vault recent mentions + the entity's `events`. |
+| Meeting prep / stakeholder brief | **`get_dossier`** | `name` (same as resolve_entity); `scope=work`; optional `since` (YYYY-MM-DD) adds a `changes_since` block. Wraps resolve_entity + open questions + cross-vault recent mentions + the entity's `events`. |
 | Check convention drift | **`lint_vault`** | optional `scope`, `folder` (default `entities`). Read-only unless `fix=true`. |
 | Who/what points at an entity, and how | **`get_backlinks`** | `name` (fuzzy/alias OK); `scope=work`. Typed inbound edges (engaged_with/attended/attendees/related_to/mention) with source note + provenance. |
 | Typed traversal from an entity | **`get_neighbors`** | `name`; `scope=work`; optional `depth` (default 1), `rel_type` filter, `direction` (out/in/both, default both). Each result carries hop count + edge type(s). |
 | "How do I know this person?" — shortest connection path | **`find_path`** | `a`, `b` (fuzzy/alias OK); `scope=work`. Returns the hop chain with edge type at each step. |
 | Machine-readable graph health (for scripts/dashboards, not just prose) | **`graph_health`** | optional `scope=work`. `lint_vault` summary + node/edge counts + edge-type histogram + orphans + missing-entity list (event customer/organizations with no matching card). |
+| Ordered interaction history for an entity | **`timeline`** | `name`; `scope=work`; optional `start`/`end` (YYYY-MM-DD). Events + dated Source History mentions + connected-note `last_updated` timestamps, newest first. |
+| "What's gone quiet" — most recent interaction | **`last_touch`** | `name`; `scope=work`. Latest `timeline` item only. |
 
 After intelligence tools return a **path**, call **`read_note`** only when you need the **full markdown body**.
 

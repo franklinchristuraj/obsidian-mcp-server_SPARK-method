@@ -318,6 +318,61 @@ class TestEventEntitySupport(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("claroty", broken)
         self.assertNotIn("julien", broken)
 
+    async def test_timeline_includes_event_and_note_modifications(self) -> None:
+        result = await self.tools.timeline("claroty", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["canonical_path"], "entities/customer/claroty.md")
+        types = {i["type"] for i in data["items"]}
+        self.assertIn("event", types)
+        event_items = [i for i in data["items"] if i["type"] == "event"]
+        self.assertTrue(
+            any("2026-05-01-claroty-discovery-call" in i["path"] for i in event_items)
+        )
+        # newest-first ordering
+        dates = [i["date"] for i in data["items"]]
+        self.assertEqual(dates, sorted(dates, reverse=True))
+
+    async def test_timeline_start_end_range_filters(self) -> None:
+        result = await self.tools.timeline(
+            "claroty", scope="work", start="2026-06-01", end="2026-12-31"
+        )
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["items"], [])
+
+    async def test_last_touch_returns_newest_item(self) -> None:
+        timeline_result = await self.tools.timeline("claroty", scope="work")
+        timeline_data = json.loads(timeline_result["content"][0]["text"])
+
+        result = await self.tools.last_touch("claroty", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["canonical_path"], "entities/customer/claroty.md")
+        self.assertEqual(data["last_touch"]["date"], timeline_data["items"][0]["date"])
+
+    async def test_get_dossier_since_adds_changes_since_without_altering_default(self) -> None:
+        baseline = await self.tools.get_dossier("claroty", scope="work")
+        baseline_data = json.loads(baseline["content"][0]["text"])
+        self.assertNotIn("changes_since", baseline_data)
+
+        result = await self.tools.get_dossier("claroty", scope="work", since="2026-05-01")
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["since"], "2026-05-01")
+        self.assertIn("changes_since", data)
+        self.assertTrue(
+            any(
+                "2026-05-01-claroty-discovery-call" in e["path"]
+                for e in data["changes_since"]["events"]
+            )
+        )
+        # everything else must be identical to the no-since call
+        for key in ("entity", "connections", "backlinks", "events", "recent_mentions"):
+            self.assertEqual(data[key], baseline_data[key])
+
+    async def test_get_dossier_since_future_date_empties_changes(self) -> None:
+        result = await self.tools.get_dossier("claroty", scope="work", since="2099-01-01")
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["changes_since"]["events"], [])
+        self.assertEqual(data["changes_since"]["mentions"], [])
+
 
 CARLOS_QUIROS_MD = """---
 type: entity
@@ -685,6 +740,8 @@ class TestToolRegistry(unittest.TestCase):
             "get_neighbors",
             "find_path",
             "graph_health",
+            "timeline",
+            "last_touch",
         }
         for name in expected:
             self.assertIn(name, OBSIDIAN_TOOL_DISPATCH)

@@ -413,6 +413,7 @@ class VaultIntelligenceTools:
         name: str,
         scope: Optional[str] = None,
         depth: int = 1,
+        since: Optional[str] = None,
     ) -> Dict[str, Any]:
         resolved = await self.resolve_entity(name, scope=scope)
         text = resolved["content"][0]["text"]
@@ -457,6 +458,7 @@ class VaultIntelligenceTools:
                         )
                         break
         mentions.sort(key=lambda m: m["date"], reverse=True)
+        all_mentions = mentions
         mentions, ment_trunc, ment_total = _truncate(mentions, CAP_DOSSIER_MENTIONS)
 
         payload = {
@@ -476,7 +478,129 @@ class VaultIntelligenceTools:
             "open_questions": open_questions,
             "depth": depth,
         }
+        if since:
+            events_since = [
+                e for e in entity_data.get("events", []) if (e.get("event_date") or "") >= since
+            ]
+            mentions_since = [m for m in all_mentions if m["date"] >= since]
+            payload["since"] = since
+            payload["changes_since"] = {
+                "events": events_since,
+                "mentions": mentions_since,
+            }
         return _json_result(payload)
+
+    async def timeline(
+        self,
+        name: str,
+        scope: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resolved = await self.resolve_entity(name, scope=scope)
+        entity_data = json.loads(resolved["content"][0]["text"])
+        if entity_data.get("disambiguation_required"):
+            return resolved
+
+        canonical = entity_data["canonical_path"]
+        entity_scope = entity_data.get("scope") or (scope or "work")
+        target_key = normalize_path_key(canonical)
+
+        def in_range(date_str: str) -> bool:
+            if not date_str:
+                return False
+            if start and date_str < start:
+                return False
+            if end and date_str > end:
+                return False
+            return True
+
+        items: List[dict] = []
+
+        for ev in entity_data.get("events", []):
+            date = ev.get("event_date", "")
+            if not in_range(date):
+                continue
+            items.append(
+                {
+                    "date": date,
+                    "type": "event",
+                    "path": ev["path"],
+                    "summary": ev.get("agent_context_of_target") or ev.get("display"),
+                }
+            )
+
+        corpus_notes = self._all_notes(scope, include_sections=False)
+        notes_by_key = self.corpus.index_by_path(corpus_notes)
+        name_index = self.corpus.index_by_name(corpus_notes)
+        for note in corpus_notes:
+            for entry in extract_source_history_entries(note):
+                if not in_range(entry["date"]):
+                    continue
+                matched = False
+                for link in entry["links"]:
+                    if link_matches_target(link, canonical):
+                        matched = True
+                    else:
+                        r = self._resolve_link(link, scope, notes_by_key, name_index)
+                        matched = bool(r and normalize_path_key(r) == target_key)
+                    if matched:
+                        break
+                if matched:
+                    items.append(
+                        {
+                            "date": entry["date"],
+                            "type": "mention",
+                            "source_path": note.path,
+                            "text": entry["text"][:200],
+                        }
+                    )
+
+        seen_mod_paths = {canonical}
+        for group in (entity_data.get("connections", []), entity_data.get("backlinks", [])):
+            for c in group:
+                path = c.get("path")
+                if not path or path in seen_mod_paths:
+                    continue
+                seen_mod_paths.add(path)
+                note = notes_by_key.get(normalize_path_key(path))
+                if note is None:
+                    continue
+                last_updated = str(note.frontmatter.get("last_updated") or "")
+                if in_range(last_updated):
+                    items.append(
+                        {
+                            "date": last_updated,
+                            "type": "note_modified",
+                            "path": note.path,
+                            "entity_type": note.entity_type,
+                        }
+                    )
+
+        items.sort(key=lambda i: i["date"], reverse=True)
+        return _json_result(
+            {
+                "canonical_path": canonical,
+                "scope": entity_scope,
+                "start": start,
+                "end": end,
+                "items": items,
+                "count": len(items),
+            }
+        )
+
+    async def last_touch(self, name: str, scope: Optional[str] = None) -> Dict[str, Any]:
+        timeline_result = await self.timeline(name, scope=scope)
+        data = json.loads(timeline_result["content"][0]["text"])
+        if data.get("disambiguation_required"):
+            return timeline_result
+        items = data.get("items", [])
+        return _json_result(
+            {
+                "canonical_path": data["canonical_path"],
+                "last_touch": items[0] if items else None,
+            }
+        )
 
     async def lint_vault(
         self,
