@@ -76,17 +76,17 @@ After editing keys, restart the server (config is loaded once per process unless
 
 ---
 
-## 5. Tool inventory (post-rework)
+## 5. Tool inventory (post-rework + knowledge graph)
 
-**MCP `tools/list` total:** **22** tools = **`ping`** + **21** Obsidian-registered tools (canonical + `obs_*` aliases).
+**MCP `tools/list` total:** **25** tools = **`ping`** + **24** Obsidian-registered tools (canonical names only; no `obs_*` aliases).
 
-**Canonical names (preferred in new skills)**
+**General vault tools**
 
 | Tool | Notes |
 |------|--------|
 | `workspaces` | No args; returns allowed scopes for this connection. |
 | `vault_structure` | Optional `scope`, `use_cache`. |
-| `list_notes` | Optional `folder`, `scope`. |
+| `list_notes` | Optional `folder`, `scope`; mtime filters `modified_after`, `modified_before`, `days`, `hours`, `limit`. |
 | `list_journal` | `startDate`, `endDate`; optional `scope`. |
 | `search` | `keyword`; optional `folder`, `scope`, `limit`, `case_sensitive`. |
 | `read_note` | `path`; optional `scope`. |
@@ -95,24 +95,36 @@ After editing keys, restart the server (config is loaded once per process unless
 | `append_note` | Same pattern as update. |
 | `note_exists` | `path`; optional `scope`. |
 | `delete_note` | `path`; optional `scope` (required if multi-scope). |
+| `capture` | Root `01_seeds/` inbox — **no scope**. |
+| `create_event` | Event entity in `work/entities/event/` — `scope=work`. |
 
-**Aliases:** each of the above (except `workspaces`) has a parallel `obs_*` name for backward compatibility (e.g. `obs_keyword_search` → `search`).
+**Vault intelligence tools** (prefer for work entities — `scope=work`)
 
-**Removed from MCP:** `obs_search_notes`, `obs_execute_command`.
+| Tool | Notes |
+|------|--------|
+| `resolve_entity` | Primary fuzzy entity lookup. |
+| `query_frontmatter` | AND frontmatter filters + optional tag (max 50). |
+| `get_dossier` | Meeting-prep brief; optional `since`. |
+| `lint_vault` | Convention drift audit; optional `fix=true`. |
+| `get_backlinks` | Typed inbound edges. |
+| `get_neighbors` | Graph traversal; optional `depth`, `rel_type`, `direction`. |
+| `find_path` | Shortest path between two entities. |
+| `graph_health` | Machine-readable health summary. |
+| `timeline` | Ordered interaction history; optional `start`/`end`. |
+| `last_touch` | Latest timeline item. |
+| `build_context` | Token-budgeted context pack; `seed` + optional `depth`, `token_budget`. |
+
+**Removed from MCP:** `obs_search_notes`, `obs_execute_command`, and all `obs_*` tool aliases.
+
+**Agent docs:** MCP prompt `vault_mcp_agent_guide`; vault-side `AGENTS.md` (tools) and `CLAUDE.md` (rules).
 
 ---
 
 ## 6. MCP prompts & resources (agent context)
 
-**Canonical agent summary:** MCP prompt **`vault_mcp_agent_guide`** ([`src/prompts/obsidian_prompts.py`](../src/prompts/obsidian_prompts.py)) — workspaces, tool-selection table, `scope` / path rules, removed tools, and **resources vs tools** (resources are **not** API-key scope filtered).
+**Canonical agent summary:** MCP prompt **`vault_mcp_agent_guide`** ([`src/prompts/obsidian_prompts.py`](../src/prompts/obsidian_prompts.py)) — workspaces, tool-selection table, `scope` / path rules, and **resources vs tools** (resources are **not** API-key scope filtered). Vault-side mirror: **`AGENTS.md`** (tool catalog), **`CLAUDE.md`** (vault rules).
 
-**Other prompts** (`note_template_system`, daily/project/area templates, `format_preservation_rules`) now state that MCP paths are **workspace-relative** and point to `vault_mcp_agent_guide` where needed.
-
-**Resources** ([`src/resources/obsidian_resources.py`](../src/resources/obsidian_resources.py)): descriptions tag **`Workspace \`personal\``** (etc.) when paths live under a known scope; vault root description warns restricted keys to prefer **tools** with **`scope`**.
-
-**Server metadata** ([`src/mcp_server.py`](../src/mcp_server.py) `serverInfo.description`): mentions workspace-scoped tools and the prompt name for discovery.
-
-**Maintenance rule:** When tool names or scope behavior change, update **`vault_mcp_agent_guide`** first, then skim template prompts for stale path wording.
+**Maintenance rule:** When tool names or scope behavior change, update **`vault_mcp_agent_guide`** first, mirror to vault **`AGENTS.md`**, then skim template prompts for stale path wording.
 
 ---
 
@@ -126,7 +138,7 @@ Skill **content** (Phase 3 in the design) is **not** stored in this repository b
 ### 7.1 What skills must teach the model
 
 - Call **`workspaces`** once per session (or when unsure) to see allowed scopes for **this** connector.
-- Use **canonical tool names** (`search`, `read_note`, …); aliases still work if old prompts reference `obs_*`.
+- Use **canonical tool names** (`search`, `read_note`, …); legacy `obs_*` aliases are **removed**.
 - **Never** put `personal/`, `passion/`, or `work/` as the first segment of `path`; use **`scope`**.
 - For **multi-scope** keys, always pass **`scope`** on **writes**.
 - On reads, **omit `scope`** to search/list across allowed workspaces, or set **`scope`** to narrow.
@@ -178,7 +190,7 @@ If you use Cursor **Rules** or **Agent Skills** (`SKILL.md`), mirror the same gu
 ## 8. Verification performed in development
 
 - **`pytest`** — full suite green (30 tests) in CI/dev venv.
-- **`verify_tools.py`** — registration, schemas, `tools/list` (22 tools), ping, unknown tool handling.
+- **`verify_tools.py`** — registration, schemas, `tools/list` (25 tools), ping, unknown tool handling.
 
 **Not** a substitute for: production smoke test with real **Obsidian REST API**, real **vault layout**, and **per-key** scope checks (work key cannot read `personal/`).
 

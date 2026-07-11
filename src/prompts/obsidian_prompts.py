@@ -135,6 +135,8 @@ Each scope has its own `00_system/templates/`, `01_seeds/`, `02_projects/`, etc.
 
 Call the **`workspaces`** tool once per session (or when unsure). It returns which scopes this **API key** may use. Do not assume access to all three.
 
+**Recommended session start:** `workspaces` → load this guide (or vault `AGENTS.md`) → `ping` for health. For entity questions, go straight to vault intelligence tools — not search+read loops.
+
 ## 3. Paths and `scope`
 
 - **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`.
@@ -166,6 +168,10 @@ The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 Event entities use **bare** links (`[[claroty]]`, `[[2026-05-01-claroty-discovery-call]]`) relying on alias/name resolution, while legacy cards use **full-path** links (`[[entities/customer/claroty.md]]`). The vault intelligence tools resolve **both** forms to the canonical path, so connections, backlinks, and `lint_vault` treat them interchangeably.
 
 **Do not** rebuild the graph with repeated `search` + `read_note` when a vault intelligence tool applies.
+
+### Work folder map (MCP paths under `scope=work`)
+
+Key paths: `entities/{entity_type}/` (knowledge graph, including `entities/event/`), `11_work-meeting-notes/` (alias `11_meeting-notes`), `12_engagements/`, `13_feedback/`, `raw/` (read only), `index.md`, `log.md`. Passion-only: `07_blueprints/` (`proj-*` / `tool-*` prefixes). Root capture inbox: vault-root `01_seeds/` via **`capture`** (no scope).
 
 ## 5. Which tool when
 
@@ -199,6 +205,7 @@ After intelligence tools return a **path**, call **`read_note`** only when you n
 | Read one file | `read_note` | `path`; optional `scope` |
 | Check existence | `note_exists` | Same pattern as read |
 | Create | `create_note` | `path`, `content`; `scope` if multi-scope key |
+| Quick-capture to root inbox | **`capture`** | **No scope.** `title`, `content`, `source`, `capture_type` (thought/post/excerpt), `spark`, `captured`. Writes `type: capture` to root `01_seeds/`. |
 | Create an **event** entity | `create_event` | `event_type` (required, controlled vocab); optional `customer`, `participants`, `organizations`, `concepts`, `event_date`, `agent_context`, `outcome`. Builds the canonical filename + schema-valid frontmatter and updates `## Events` back-refs. `scope=work`. |
 | Replace body | `update_note` | `scope` if multi-scope key |
 | Append | `append_note` | `scope` if multi-scope key |
@@ -226,6 +233,9 @@ Use only registered tool names (legacy `obs_*` names are not available).
 **Logging a new interaction** (call, build session, demo…):
 1. `create_event(event_type="discovery-call", customer="GoJob", participants=["Julien"], event_date="2026-06-01", scope="work")` — handles filename, frontmatter, and `## Events` back-refs. Prefer this over hand-building an event card with `create_note`.
 
+**Quick capture** (voice thought, saved post, excerpt — pre-scope inbox):
+1. `capture(content="...", source="voice", capture_type="thought")` — no scope needed. Promotion to a workspace happens at weekly triage.
+
 **Free-text grep across notes** (when not entity-centric):
 1. `search(keyword="...", scope="work")`
 
@@ -237,6 +247,8 @@ Use only registered tool names (legacy `obs_*` names are not available).
 ## 7. Claude / Cursor skills (outside this server)
 
 Align user-facing skills with: routing rules (which scope for which topic), tool names above, and “call `workspaces` first.” Work-only assistants should default to **`scope=work`** and vault intelligence tools for entity questions.
+
+Vault-side companion docs: **`AGENTS.md`** (MCP tool catalog), **`CLAUDE.md`** (vault rules and ontology).
 
 ## 8. Template prompts
 
@@ -288,6 +300,25 @@ This vault uses a structured template system with YAML frontmatter for different
 ### 6. Knowledge (05_knowledge/)
 - **Purpose**: Personal insights and learned concepts
 - **Structure**: Structured knowledge base
+
+### 7. Work meeting notes (11_work-meeting-notes/)
+- **Purpose**: Meeting documentation in the work scope
+- **MCP path**: `11_work-meeting-notes/YYYY-MM-DD_kebab.md` with `scope=work`
+- **Alias**: `11_meeting-notes` is accepted by the MCP template engine
+
+### 8. Event entities (entities/event/) — work scope only
+- **Purpose**: Single interactions as knowledge-graph nodes (calls, demos, build sessions)
+- **MCP path**: `entities/event/YYYY-MM-DD-{slug}-{event_type}.md` with `scope=work`
+- **Authoring**: Prefer MCP **`create_event`** over hand-building with `create_note`
+
+### 9. Root capture inbox (vault-root 01_seeds/) — no scope
+- **Purpose**: Pre-scope captures awaiting triage (`type: capture`, not `type: seed`)
+- **MCP tool**: **`capture`** (no scope parameter)
+- **Schema**: `capture_type` (thought|post|excerpt), `source`, `captured`, `spark`, `status: inbox`
+
+### 10. Blueprints (passion/07_blueprints/) — passion scope only
+- **Purpose**: VPS infrastructure documentation
+- **Naming**: `proj-*` → blueprint-project template; `tool-*` → blueprint-tool template (filename-prefix convention; no auto-template in MCP for other names)
 
 ## Key Principles
 

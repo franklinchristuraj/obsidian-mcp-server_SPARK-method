@@ -47,9 +47,10 @@ class MCPProtocolHandler:
             "name": "obsidian-mcp-server",
             "version": "2.1.0",
             "description": (
-                "Obsidian MCP server with workspace-scoped tools (personal / passion / work) "
-                "and vault intelligence (resolve_entity, query_frontmatter, get_dossier). "
-                "Load MCP prompt vault_mcp_agent_guide first for tool choice and workflows."
+                "Obsidian MCP server (v2.1.0): workspace-scoped CRUD (personal / passion / work), "
+                "vault intelligence (resolve_entity, query_frontmatter, get_dossier, graph/timeline tools, "
+                "lint_vault, build_context), capture inbox, and create_event. "
+                "Load MCP prompt vault_mcp_agent_guide first."
             ),
         }
         self.capabilities = MCPCapabilities(

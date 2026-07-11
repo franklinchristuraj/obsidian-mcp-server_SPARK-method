@@ -6,10 +6,8 @@ This change makes the vault's new `event` entity a first-class, queryable graph
 node in the MCP server and adds a set of retrieval and note-authoring
 improvements that build on it.
 
-> Scope note: the vault/docs rollout items that live outside this repo
-> (`CLAUDE.md` entity registry, `work/index.md` Events catalog, the
-> `franklin-obsidian-vault` skill's Entity Layer section) are **not** part of
-> this change and are tracked separately.
+> Scope note: vault-side agent docs (`CLAUDE.md`, `AGENTS.md`, `work/CLAUDE.md`,
+> `franklin-obsidian-vault` skill) were updated in Jul 2026 to reflect these tools.
 
 ---
 

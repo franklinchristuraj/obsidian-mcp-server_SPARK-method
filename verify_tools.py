@@ -36,6 +36,19 @@ def verify_tool_registration():
         "append_note",
         "note_exists",
         "delete_note",
+        "resolve_entity",
+        "query_frontmatter",
+        "get_dossier",
+        "lint_vault",
+        "get_backlinks",
+        "get_neighbors",
+        "find_path",
+        "graph_health",
+        "timeline",
+        "last_touch",
+        "build_context",
+        "capture",
+        "create_event",
     ]
 
     registered_names = [tool.name for tool in registered_tools]

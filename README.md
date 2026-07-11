@@ -9,28 +9,49 @@ A Model Context Protocol (MCP) server providing AI assistants with full access t
 - **Service**: systemd user service (`obsidian-mcp.service`)
 - **Protocol**: MCP 2024-11-05 / JSON-RPC 2.0
 
-## Tools (18 total)
+## Tools (25 total)
+
+Load MCP prompt **`vault_mcp_agent_guide`** (or vault `AGENTS.md`) for tool-selection workflows.
+
+### Connectivity
 
 | Tool | Description |
 |---|---|
 | `ping` | Liveness check |
 | `workspaces` | List scopes allowed for this API key |
+
+### General vault
+
+| Tool | Description |
+|---|---|
 | `vault_structure` | Folder tree with recursive note counts |
 | `list_notes` | List notes with mtime filters (modified_after, modified_before, rolling days/hours, limit) |
 | `list_journal` | Daily notes in a date range |
-| `search` | Relevance-ranked keyword search over the parsed corpus (title/alias/agent_context/frontmatter scored above body) |
+| `search` | Relevance-ranked keyword search (param is `keyword`, not `query`) |
 | `read_note` | Read a note by path |
-| `create_note` | Create a note with optional template (scope required for multi-workspace keys). Soft-validates entity-card schema |
+| `create_note` | Create a note with optional template (scope required for multi-workspace keys) |
 | `update_note` | Replace note content (preserves frontmatter for entity cards) |
 | `append_note` | Append to a note |
 | `note_exists` | Check note existence |
 | `delete_note` | Delete a note |
-| `resolve_entity` | Fuzzy entity/alias lookup — returns canonical path, frontmatter, connections, backlinks, and the entity's `events` timeline (targets carry `entity_type`) |
-| `query_frontmatter` | Filter notes by frontmatter: scalar (wikilink-aware), list membership, or `{gte/lte/gt/lt/eq}` ranges |
-| `get_dossier` | Meeting-prep brief for an entity (wraps resolve_entity + recent mentions + events) |
-| `lint_vault` | Audit convention drift: per-type required frontmatter, event_type vocab, broken wikilinks (bare + full-path), orphan entities |
-| `capture` | Quick-capture to `01_seeds/` at vault root — **no scope needed** (voice/phone capture) |
-| `create_event` | Create an `event` entity card (canonical filename + schema-valid frontmatter + body) and update `## Events` back-refs |
+| `capture` | Quick-capture to root `01_seeds/` — **no scope needed** |
+| `create_event` | Create an `event` entity card + `## Events` back-refs (`scope=work`) |
+
+### Vault intelligence (`scope=work`)
+
+| Tool | Description |
+|---|---|
+| `resolve_entity` | Fuzzy entity/alias lookup — path, connections, backlinks, events |
+| `query_frontmatter` | Filter by frontmatter (AND) + optional tag (max 50) |
+| `get_dossier` | Meeting-prep brief; optional `since` |
+| `lint_vault` | Convention drift audit; optional `fix=true` |
+| `get_backlinks` | Typed inbound edges |
+| `get_neighbors` | Graph traversal with depth, rel_type, direction |
+| `find_path` | Shortest connection path between two entities |
+| `graph_health` | Machine-readable graph health summary |
+| `timeline` | Ordered interaction history |
+| `last_touch` | Most recent timeline item |
+| `build_context` | Token-budgeted graph-augmented context pack |
 
 ## Vault Structure
 
@@ -148,18 +169,18 @@ obsidian-mcp-server/
 │   ├── token_store.py          # SQLite-backed token/client store
 │   ├── scope.py                # Workspace scope resolution
 │   ├── tools/
-│   │   └── obsidian_tools.py   # All 17 tool definitions + implementations
+│   │   └── obsidian_tools.py   # All 24 Obsidian tool definitions + implementations
 │   ├── prompts/
 │   │   └── obsidian_prompts.py # MCP prompts
 │   ├── clients/
-│   │   └── obsidian_client.py  # Obsidian REST API wrapper
+│   │   └── obsidian_client.py  # Filesystem-native vault access
 │   ├── utils/
 │   │   ├── template_utils.py   # Template detection + application
 │   │   └── list_notes_time.py  # mtime filter helpers for list_notes
 │   └── vault_intelligence/     # Entity graph, dossier, lint tools
 │       ├── corpus.py           # Note corpus builder
 │       ├── parser.py           # Frontmatter + wikilink parser
-│       └── tools.py            # resolve_entity, get_dossier, lint_vault
+│       └── tools.py            # Vault intelligence tool implementations
 ├── tests/
 ├── scripts/
 │   └── dev-server.sh           # Local dev server manager (macOS)
@@ -219,7 +240,7 @@ Templates live in each workspace's `00_system/templates/` folder. The server aut
 | `11_work-meeting-notes/` | `meeting-notes.md` |
 | `entities/event/` | `event_template.md` (falls back to a built-in event scaffold) |
 
-The `capture` tool uses a hardcoded generic seed template (cross-scope, no workspace needed). The `create_event` tool builds event cards from structured fields; other entity cards are hand-maintained.
+The `capture` tool uses the vault capture template (`00_system/templates/capture.md`) with inline fallback. The `create_event` tool builds event cards from structured fields; other entity cards are hand-maintained.
 
 ## Documentation
 
