@@ -12,6 +12,7 @@ from src.scope import active_scopes_for_read, get_effective_workspace_context
 
 from .corpus import ConcurrentModificationError, VaultCorpus
 from .entity_index import EntityIndex, match_entities
+from .graph import GraphIndex, as_link_list
 from .parser import (
     CONNECTIONS_HEADING,
     EVENT_TYPES,
@@ -623,6 +624,99 @@ class VaultIntelligenceTools:
             "write_errors": write_errors,
         }
         return _json_result(rescanned_payload)
+
+    def _match_or_result(
+        self, name: str, entities: List[Any]
+    ) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+        """Resolve name via match_entities; on disambiguation/no-match returns
+        (None, early_result) for the caller to return directly, else (match, None)."""
+        match, disambiguation = match_entities(name, entities)
+        if disambiguation:
+            return None, _json_result(
+                {"disambiguation_required": True, "query": name, "candidates": disambiguation}
+            )
+        if match is None:
+            raise ValueError(f"No entity matched: {name!r}")
+        return match, None
+
+    async def get_neighbors(
+        self,
+        name: str,
+        scope: Optional[str] = None,
+        depth: int = 1,
+        rel_type: Optional[str] = None,
+        direction: str = "both",
+    ) -> Dict[str, Any]:
+        entities = self._entity_notes(scope)
+        if not entities:
+            raise ValueError("No entity cards found in scope")
+        match, early = self._match_or_result(name, entities)
+        if early is not None:
+            return early
+        graph = GraphIndex(entities)
+        return _json_result(
+            graph.neighbors(match.path, depth=depth, rel_type=rel_type, direction=direction)
+        )
+
+    async def get_backlinks(self, name: str, scope: Optional[str] = None) -> Dict[str, Any]:
+        entities = self._entity_notes(scope)
+        if not entities:
+            raise ValueError("No entity cards found in scope")
+        match, early = self._match_or_result(name, entities)
+        if early is not None:
+            return early
+        graph = GraphIndex(entities)
+        return _json_result(graph.backlinks(match.path))
+
+    async def find_path(self, a: str, b: str, scope: Optional[str] = None) -> Dict[str, Any]:
+        entities = self._entity_notes(scope)
+        if not entities:
+            raise ValueError("No entity cards found in scope")
+        match_a, early_a = self._match_or_result(a, entities)
+        if early_a is not None:
+            return early_a
+        match_b, early_b = self._match_or_result(b, entities)
+        if early_b is not None:
+            return early_b
+        graph = GraphIndex(entities)
+        return _json_result(graph.shortest_path(match_a.path, match_b.path))
+
+    async def graph_health(self, scope: Optional[str] = None) -> Dict[str, Any]:
+        lint_result = await self.lint_vault(scope=scope, folder="entities", fix=False)
+        lint_payload = json.loads(lint_result["content"][0]["text"])
+
+        entities = self._entity_notes(scope)
+        graph = GraphIndex(entities)
+        entity_index = graph.entity_index
+
+        missing_entities: List[dict] = []
+        seen_missing: set = set()
+        for note in entities:
+            if note.entity_type != "event":
+                continue
+            fm = note.frontmatter
+            for field_name, raw in (
+                ("customer", fm.get("customer")),
+                ("organizations", fm.get("organizations")),
+            ):
+                for link in as_link_list(raw):
+                    if entity_index.resolve_bare_or_path(link) is not None:
+                        continue
+                    key = link.strip().lower()
+                    if key in seen_missing:
+                        continue
+                    seen_missing.add(key)
+                    missing_entities.append(
+                        {"name": link, "referenced_from": note.path, "field": field_name}
+                    )
+
+        payload = {
+            "lint_summary": lint_payload["summary"],
+            "graph": graph.health_summary(),
+            "missing_entities": missing_entities,
+            "missing_entities_count": len(missing_entities),
+        }
+        return _json_result(payload)
 
     async def search_notes_ranked(
         self,

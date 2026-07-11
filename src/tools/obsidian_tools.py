@@ -245,6 +245,10 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "query_frontmatter": "query_frontmatter",
     "get_dossier": "get_dossier",
     "lint_vault": "lint_vault",
+    "get_backlinks": "get_backlinks",
+    "get_neighbors": "get_neighbors",
+    "find_path": "find_path",
+    "graph_health": "graph_health",
     "capture": "capture_seed",
     "create_event": "create_event",
 }
@@ -658,6 +662,77 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "default": False,
                     },
                 },
+                [],
+            ),
+            _tool(
+                "get_backlinks",
+                (
+                    "Typed inbound edges for an entity: who/what points at it and how "
+                    "(engaged_with, attended, attendees, related_to, mention), with source note "
+                    "and provenance. Use scope=work."
+                ),
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Entity name, alias, or partial filename (same fuzzy resolution as resolve_entity)",
+                    },
+                    "scope": sr,
+                },
+                ["name"],
+            ),
+            _tool(
+                "get_neighbors",
+                (
+                    "Typed graph traversal from an entity: connected entities within `depth` hops, "
+                    "each with hop count and the edge type(s) linking it. Optionally filter to one "
+                    "edge type (e.g. rel_type=engaged_with) or direction (out/in/both). Use scope=work."
+                ),
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Entity name, alias, or partial filename (same fuzzy resolution as resolve_entity)",
+                    },
+                    "scope": sr,
+                    "depth": {
+                        "type": "integer",
+                        "description": "Traversal hop depth (default 1)",
+                        "default": 1,
+                    },
+                    "rel_type": {
+                        "type": "string",
+                        "description": "Optional edge type filter: engaged_with, attended, attendees, related_to, mention",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["out", "in", "both"],
+                        "description": "Edge direction to follow (default both)",
+                        "default": "both",
+                    },
+                },
+                ["name"],
+            ),
+            _tool(
+                "find_path",
+                (
+                    "Shortest connection path between two entities, with the edge type at each hop "
+                    "(e.g. \"how do I know this person?\"). Use scope=work."
+                ),
+                {
+                    "a": {"type": "string", "description": "First entity name/alias"},
+                    "b": {"type": "string", "description": "Second entity name/alias"},
+                    "scope": sr,
+                },
+                ["a", "b"],
+            ),
+            _tool(
+                "graph_health",
+                (
+                    "Machine-readable graph health: lint_vault's convention-drift summary, "
+                    "node/edge counts and edge-type histogram, orphan entities, and a missing-entity "
+                    "list (event customer/organizations values with no matching entity card). "
+                    "Use scope=work."
+                ),
+                {"scope": sr},
                 [],
             ),
             _tool(
@@ -1862,6 +1937,31 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         return await self._get_vault_intel().lint_vault(
             scope=scope, folder=folder, fix=fix
         )
+
+    async def get_backlinks(
+        self, name: str, scope: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().get_backlinks(name, scope=scope)
+
+    async def get_neighbors(
+        self,
+        name: str,
+        scope: Optional[str] = None,
+        depth: int = 1,
+        rel_type: Optional[str] = None,
+        direction: str = "both",
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().get_neighbors(
+            name, scope=scope, depth=depth, rel_type=rel_type, direction=direction
+        )
+
+    async def find_path(
+        self, a: str, b: str, scope: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().find_path(a, b, scope=scope)
+
+    async def graph_health(self, scope: Optional[str] = None) -> Dict[str, Any]:
+        return await self._get_vault_intel().graph_health(scope=scope)
 
     # =================== Tool Dispatcher ===================
 

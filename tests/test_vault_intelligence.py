@@ -676,10 +676,20 @@ class TestToolRegistry(unittest.TestCase):
     def test_vault_intel_tools_registered(self) -> None:
         from src.tools.obsidian_tools import OBSIDIAN_TOOL_DISPATCH, obsidian_tools
 
-        for name in ("resolve_entity", "query_frontmatter", "get_dossier", "lint_vault"):
+        expected = {
+            "resolve_entity",
+            "query_frontmatter",
+            "get_dossier",
+            "lint_vault",
+            "get_backlinks",
+            "get_neighbors",
+            "find_path",
+            "graph_health",
+        }
+        for name in expected:
             self.assertIn(name, OBSIDIAN_TOOL_DISPATCH)
         listed = {t.name for t in obsidian_tools.get_tools()}
-        self.assertTrue({"resolve_entity", "query_frontmatter", "get_dossier", "lint_vault"} <= listed)
+        self.assertTrue(expected <= listed)
 
 
 if __name__ == "__main__":
