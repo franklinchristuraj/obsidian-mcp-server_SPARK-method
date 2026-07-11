@@ -842,6 +842,135 @@ class VaultIntelligenceTools:
         }
         return _json_result(payload)
 
+    _CONTEXT_TIER_RANK = {
+        "engaged_with": 1,
+        "attended": 1,
+        "attendees": 1,
+        "related_to": 2,
+        "mention": 3,
+    }
+    _CONTEXT_TIER_LABEL = {1: "typed", 2: "related", 3: "mention"}
+
+    @staticmethod
+    def _approx_tokens(text: str) -> int:
+        return max(1, len(text) // 4) if text else 0
+
+    async def build_context(
+        self,
+        seed: str,
+        scope: Optional[str] = None,
+        depth: int = 1,
+        token_budget: int = 4000,
+    ) -> Dict[str, Any]:
+        entities = self._entity_notes(scope)
+        if not entities:
+            raise ValueError("No entity cards found in scope")
+
+        match, disambiguation = match_entities(seed, entities)
+        resolution = "entity"
+        if disambiguation:
+            return _json_result(
+                {"disambiguation_required": True, "query": seed, "candidates": disambiguation}
+            )
+        if match is None:
+            # No entity match at all: fall back to ranked free-text search.
+            hits = await self.search_notes_ranked(seed, scope=scope, limit=1)
+            if not hits:
+                raise ValueError(f"No entity or note matched: {seed!r}")
+            top = hits[0]
+            found = self.corpus.get_note(top.get("scope") or (scope or "work"), top["path"])
+            if found is None:
+                raise ValueError(f"No entity or note matched: {seed!r}")
+            match = found
+            resolution = "search"
+            if not any(normalize_path_key(e.path) == normalize_path_key(match.path) for e in entities):
+                entities = entities + [match]
+
+        graph = GraphIndex(entities)
+        neighbor_result = graph.neighbors(match.path, depth=depth, direction="both")
+
+        def best_tier(edge_types: List[str]) -> int:
+            return min((self._CONTEXT_TIER_RANK.get(t, 3) for t in edge_types), default=3)
+
+        ranked: List[dict] = []
+        for n in neighbor_result.get("neighbors", []):
+            node = graph.nodes.get(normalize_path_key(n["path"]))
+            if node is None:
+                continue
+            ranked.append(
+                {
+                    "node": node,
+                    "tier": best_tier(n["edge_types"]),
+                    "hops": n["hops"],
+                    "edge_types": n["edge_types"],
+                    "degree": graph.degree(node.path),
+                    "recency": node.sort_date(),
+                }
+            )
+        # Stable multi-pass sort, least-significant key first: degree desc,
+        # recency desc, hops asc, tier asc (edge strength: typed > related > mention).
+        ranked.sort(key=lambda r: -r["degree"])
+        ranked.sort(key=lambda r: r["recency"], reverse=True)
+        ranked.sort(key=lambda r: r["hops"])
+        ranked.sort(key=lambda r: r["tier"])
+
+        core_content = "\n\n".join(
+            part
+            for part in (
+                match.agent_context,
+                match.sections.get(OPEN_QUESTIONS_HEADING, "").strip(),
+                (match.body or "")[:1500].strip(),
+            )
+            if part
+        )
+        core_tokens = self._approx_tokens(core_content)
+
+        pack: List[dict] = [
+            {
+                "path": match.path,
+                "tier": "core",
+                "hops": 0,
+                "edge_types": [],
+                "content": core_content,
+                "tokens": core_tokens,
+            }
+        ]
+        manifest = [match.path]
+        tokens_used = core_tokens
+        truncated = False
+
+        for r in ranked:
+            node = r["node"]
+            content = node.agent_context or (node.body or "")[:200].strip()
+            t = self._approx_tokens(content)
+            if tokens_used + t > token_budget:
+                truncated = True
+                break
+            pack.append(
+                {
+                    "path": node.path,
+                    "tier": self._CONTEXT_TIER_LABEL.get(r["tier"], "mention"),
+                    "hops": r["hops"],
+                    "edge_types": r["edge_types"],
+                    "content": content,
+                    "tokens": t,
+                }
+            )
+            manifest.append(node.path)
+            tokens_used += t
+
+        return _json_result(
+            {
+                "resolved": True,
+                "seed": {"query": seed, "canonical_path": match.path, "resolution": resolution},
+                "token_budget": token_budget,
+                "tokens_used": tokens_used,
+                "truncated": truncated,
+                "context_pack": pack,
+                "source_manifest": manifest,
+            }
+        )
+
     async def search_notes_ranked(
         self,
         keyword: str,

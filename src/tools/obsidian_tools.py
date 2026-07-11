@@ -251,6 +251,7 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "graph_health": "graph_health",
     "timeline": "timeline",
     "last_touch": "last_touch",
+    "build_context": "build_context",
     "capture": "capture_seed",
     "create_event": "create_event",
 }
@@ -784,6 +785,36 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "scope": sr,
                 },
                 ["name"],
+            ),
+            _tool(
+                "build_context",
+                (
+                    "Graph-augmented context pack for meeting prep / research: resolves `seed` "
+                    "(entity name, falls back to ranked free-text search if no entity matches), "
+                    "then expands typed neighbors (engaged_with/attended/attendees) first, "
+                    "related_to second, mentions last, ranked by edge strength/recency/degree, "
+                    "compressed to fit `token_budget`. Prefer over get_dossier when you need a "
+                    "budget-bounded brief spanning multiple hops, with a source manifest. "
+                    "Use scope=work."
+                ),
+                {
+                    "seed": {
+                        "type": "string",
+                        "description": "Entity name/alias, or free text if no entity matches",
+                    },
+                    "scope": sr,
+                    "depth": {
+                        "type": "integer",
+                        "description": "Neighbor expansion hop depth (default 1)",
+                        "default": 1,
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Approximate token budget for the returned context pack (default 4000)",
+                        "default": 4000,
+                    },
+                },
+                ["seed"],
             ),
             _tool(
                 "capture",
@@ -2031,6 +2062,17 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         self, name: str, scope: Optional[str] = None
     ) -> Dict[str, Any]:
         return await self._get_vault_intel().last_touch(name, scope=scope)
+
+    async def build_context(
+        self,
+        seed: str,
+        scope: Optional[str] = None,
+        depth: int = 1,
+        token_budget: int = 4000,
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().build_context(
+            seed, scope=scope, depth=depth, token_budget=token_budget
+        )
 
     # =================== Tool Dispatcher ===================
 

@@ -246,6 +246,14 @@ class GraphIndex:
             "count": len(entries),
         }
 
+    def degree(self, name: str) -> int:
+        """Total in+out edge count for a resolvable node name/path (0 if unresolved)."""
+        resolved = self._resolve_node(name)
+        if resolved is None:
+            return 0
+        key = normalize_path_key(resolved)
+        return len(self._out.get(key, [])) + len(self._in.get(key, []))
+
     def shortest_path(self, a: str, b: str) -> Dict[str, Any]:
         start = self._resolve_node(a)
         end = self._resolve_node(b)

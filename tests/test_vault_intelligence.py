@@ -742,6 +742,7 @@ class TestToolRegistry(unittest.TestCase):
             "graph_health",
             "timeline",
             "last_touch",
+            "build_context",
         }
         for name in expected:
             self.assertIn(name, OBSIDIAN_TOOL_DISPATCH)

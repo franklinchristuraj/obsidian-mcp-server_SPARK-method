@@ -183,6 +183,7 @@ Event entities use **bare** links (`[[claroty]]`, `[[2026-05-01-claroty-discover
 | Machine-readable graph health (for scripts/dashboards, not just prose) | **`graph_health`** | optional `scope=work`. `lint_vault` summary + node/edge counts + edge-type histogram + orphans + missing-entity list (event customer/organizations with no matching card). |
 | Ordered interaction history for an entity | **`timeline`** | `name`; `scope=work`; optional `start`/`end` (YYYY-MM-DD). Events + dated Source History mentions + connected-note `last_updated` timestamps, newest first. |
 | "What's gone quiet" — most recent interaction | **`last_touch`** | `name`; `scope=work`. Latest `timeline` item only. |
+| Budget-bounded, graph-augmented context pack (multi-hop research/prep) | **`build_context`** | `seed` (entity name, or free text — falls back to ranked search); `scope=work`; optional `depth` (default 1), `token_budget` (default 4000). Typed neighbors first, then related_to, then mentions; returns a `context_pack` + `source_manifest`. |
 
 After intelligence tools return a **path**, call **`read_note`** only when you need the **full markdown body**.
 

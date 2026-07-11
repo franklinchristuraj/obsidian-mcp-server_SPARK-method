@@ -12,7 +12,7 @@ entity_type: customer
 created: 2026-01-01
 last_updated: 2026-05-02
 agent_context: "Claroty is an OT security customer."
-aliases: ["Claroty Inc"]
+aliases: ["Claroty Inc", "Co Test"]
 tags:
   - entity
   - customer
@@ -104,7 +104,7 @@ entity_type: customer
 created: 2026-01-01
 last_updated: 2026-01-01
 agent_context: "Standalone customer with no connections."
-aliases: []
+aliases: ["Co Test"]
 tags:
   - entity
   - customer
@@ -282,6 +282,79 @@ class TestGraphToolsIntegration(GraphFixtureTestCase):
         missing_names = {m["name"] for m in data["missing_entities"]}
         self.assertIn("unknown-corp", missing_names)
         self.assertEqual(data["graph"]["node_count"], 6)
+
+
+RANDOM_NOTE_MD = """---
+type: note
+created: 2026-01-01
+---
+
+# Meeting scratch
+
+Nothing to do with kumquat-zephyr-9000 entities, just a random note that
+mentions the distinctive keyword kumquat-zephyr-9000 for search fallback.
+"""
+
+
+class TestBuildContext(GraphFixtureTestCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        root = Path(self._tmp.name)
+        notes_dir = root / "work" / "notes"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        (notes_dir / "random-note.md").write_text(RANDOM_NOTE_MD, encoding="utf-8")
+
+    async def test_resolves_entity_seed_and_expands_typed_first(self) -> None:
+        result = await self.tools.build_context("claroty", scope="work", depth=1, token_budget=4000)
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["seed"]["resolution"], "entity")
+        self.assertEqual(data["seed"]["canonical_path"], "entities/customer/claroty.md")
+        self.assertEqual(data["context_pack"][0]["tier"], "core")
+        self.assertEqual(data["context_pack"][0]["path"], "entities/customer/claroty.md")
+        # the engaged_with event (typed) must rank ahead of the plain related_to concept
+        tiers_in_order = [item["tier"] for item in data["context_pack"]]
+        self.assertLess(
+            tiers_in_order.index("typed") if "typed" in tiers_in_order else 999,
+            tiers_in_order.index("related") if "related" in tiers_in_order else 999,
+        )
+        self.assertEqual(data["source_manifest"][0], "entities/customer/claroty.md")
+
+    async def test_respects_token_budget_and_marks_truncated(self) -> None:
+        result = await self.tools.build_context("claroty", scope="work", depth=1, token_budget=1)
+        data = json.loads(result["content"][0]["text"])
+        # core is always included even if it alone exceeds the budget
+        self.assertEqual(len(data["context_pack"]), 1)
+        self.assertEqual(data["context_pack"][0]["tier"], "core")
+        self.assertTrue(data["truncated"])
+        self.assertLessEqual(len(data["source_manifest"]), 1)
+
+    async def test_disambiguation_required_short_circuits(self) -> None:
+        # claroty and orphan-co share the alias "Co Test" -> match_entities'
+        # alias step finds two hits, forcing disambiguation before any graph work.
+        result = await self.tools.build_context("Co Test", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        self.assertTrue(data.get("disambiguation_required"), f"expected disambiguation, got: {data}")
+        self.assertNotIn("seed", data)
+        candidate_paths = {c["path"] for c in data["candidates"]}
+        self.assertEqual(
+            candidate_paths,
+            {"entities/customer/claroty.md", "entities/customer/orphan-co.md"},
+        )
+
+    async def test_falls_back_to_search_for_non_entity_seed(self) -> None:
+        result = await self.tools.build_context(
+            "kumquat-zephyr-9000", scope="work", depth=1, token_budget=4000
+        )
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["seed"]["resolution"], "search")
+        self.assertIn("random-note", data["seed"]["canonical_path"])
+        self.assertEqual(data["context_pack"][0]["path"], data["seed"]["canonical_path"])
+
+    async def test_no_match_at_all_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.tools.build_context(
+                "zzz-absolutely-nothing-matches-this-qqq", scope="work"
+            )
 
 
 if __name__ == "__main__":
