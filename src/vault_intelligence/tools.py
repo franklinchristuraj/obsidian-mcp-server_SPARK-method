@@ -589,18 +589,39 @@ class VaultIntelligenceTools:
             }
         )
 
+    # Fidelity ranking for last_touch: a linked note's `last_updated` can be
+    # edited for reasons unrelated to this entity (typo fix, backlink
+    # cleanup, unrelated section added) and outrank a real event or dated
+    # mention purely on recency. Prefer event -> mention -> note_modified;
+    # only fall back to note_modified (flagged) when nothing else exists.
+    _LAST_TOUCH_TIER = {"event": 0, "mention": 1, "note_modified": 2}
+
     async def last_touch(self, name: str, scope: Optional[str] = None) -> Dict[str, Any]:
         timeline_result = await self.timeline(name, scope=scope)
         data = json.loads(timeline_result["content"][0]["text"])
         if data.get("disambiguation_required"):
             return timeline_result
+
         items = data.get("items", [])
-        return _json_result(
-            {
-                "canonical_path": data["canonical_path"],
-                "last_touch": items[0] if items else None,
-            }
+        # `items` is already sorted newest-first by the timeline; picking
+        # the first item matching the best available tier yields the most
+        # recent item within that tier without needing to re-sort.
+        best_tier = min(
+            (self._LAST_TOUCH_TIER.get(i["type"], 99) for i in items), default=None
         )
+        chosen = (
+            next((i for i in items if self._LAST_TOUCH_TIER.get(i["type"], 99) == best_tier), None)
+            if best_tier is not None
+            else None
+        )
+
+        payload: Dict[str, Any] = {
+            "canonical_path": data["canonical_path"],
+            "last_touch": chosen,
+        }
+        if chosen is not None:
+            payload["fallback_to_note_modified"] = chosen["type"] == "note_modified"
+        return _json_result(payload)
 
     async def lint_vault(
         self,

@@ -347,6 +347,55 @@ class TestEventEntitySupport(unittest.IsolatedAsyncioTestCase):
         data = json.loads(result["content"][0]["text"])
         self.assertEqual(data["canonical_path"], "entities/customer/claroty.md")
         self.assertEqual(data["last_touch"]["date"], timeline_data["items"][0]["date"])
+        self.assertEqual(data["last_touch"]["type"], "event")
+        self.assertFalse(data["fallback_to_note_modified"])
+
+    async def test_last_touch_prefers_event_over_newer_note_modified(self) -> None:
+        """Regression for the Reception PRD 1 §6 bug: a linked note's
+        `last_updated` (edited for reasons unrelated to this entity) must
+        not outrank a real event just because its date is more recent.
+        """
+        root = Path(self._tmp.name)
+        julien_path = root / "work" / "entities" / "person" / "julien.md"
+        # Julien's card gets touched a month after the actual Claroty
+        # interaction — e.g. an unrelated alias cleanup — which must not
+        # make last_touch claim Claroty was "touched" on 2026-06-15.
+        julien_path.write_text(JULIEN_MD.replace("last_updated: 2026-05-01", "last_updated: 2026-06-15"), encoding="utf-8")
+        self.tools.corpus.clear_cache()
+
+        timeline_result = await self.tools.timeline("claroty", scope="work")
+        timeline_data = json.loads(timeline_result["content"][0]["text"])
+        # Confirm the fixture actually exercises the bug: the newest item
+        # overall is now the note_modified one, not the event.
+        self.assertEqual(timeline_data["items"][0]["type"], "note_modified")
+        self.assertEqual(timeline_data["items"][0]["date"], "2026-06-15")
+
+        result = await self.tools.last_touch("claroty", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["last_touch"]["type"], "event")
+        self.assertEqual(data["last_touch"]["date"], "2026-05-01")
+        self.assertFalse(data["fallback_to_note_modified"])
+
+    async def test_last_touch_falls_back_to_note_modified_when_flagged(self) -> None:
+        """When an entity has no event or dated mention at all, last_touch
+        may fall back to note_modified — but must say so explicitly."""
+        root = Path(self._tmp.name)
+        # Strip Claroty's event link and Source History so only
+        # note_modified items remain in its timeline.
+        stripped = CLAROTY_MD.replace(
+            '## Events\n- [[2026-05-01-claroty-discovery-call]] — discovery-call, 2026-05-01\n\n',
+            "",
+        ).replace(
+            "## Source History\n- [2026-05-01] — Kickoff call [[2026-05-01-claroty-discovery-call]]\n",
+            "",
+        )
+        (root / "work" / "entities" / "customer" / "claroty.md").write_text(stripped, encoding="utf-8")
+        self.tools.corpus.clear_cache()
+
+        result = await self.tools.last_touch("claroty", scope="work")
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["last_touch"]["type"], "note_modified")
+        self.assertTrue(data["fallback_to_note_modified"])
 
     async def test_get_dossier_since_adds_changes_since_without_altering_default(self) -> None:
         baseline = await self.tools.get_dossier("claroty", scope="work")
