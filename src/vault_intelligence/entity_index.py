@@ -162,7 +162,17 @@ def match_entities(
             if not cand:
                 continue
             if query_kebab in cand or cand in query_kebab:
-                best = max(best or 0.0, 0.9)
+                # Containment is a strong signal, but a flat score here made
+                # every filename that merely happens to contain the query
+                # (e.g. query "gojo" inside "gojob", "gojob-discovery-call",
+                # "gojob-credential-handling-concern") tie for first place.
+                # Scale by how much of the longer string the shorter one
+                # actually covers, so "gojo" -> "gojob" (tight match) scores
+                # well above "gojo" -> a 30-char event/pain-point filename
+                # that merely embeds the same substring.
+                shorter, longer = sorted((len(query_kebab), len(cand)))
+                coverage = shorter / longer if longer else 1.0
+                best = max(best or 0.0, 0.85 + 0.1 * coverage)
                 continue
             dist = _levenshtein(query_kebab, cand)
             ratio = SequenceMatcher(None, query_kebab, cand).ratio()

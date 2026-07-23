@@ -16,6 +16,7 @@ class MCPMessageType(Enum):
     TOOLS_CALL = "tools/call"
     RESOURCES_LIST = "resources/list"
     RESOURCES_READ = "resources/read"
+    RESOURCES_TEMPLATES_LIST = "resources/templates/list"
     PROMPTS_LIST = "prompts/list"
     PROMPTS_GET = "prompts/get"
     PING = "ping"
@@ -30,6 +31,11 @@ class MCPTool:
     name: str
     description: str
     inputSchema: Dict[str, Any]
+    # Spec 2025-06-18 additions. annotations are hints only (not security
+    # boundaries) - a client may use them to decide whether to prompt before
+    # running a tool. outputSchema, when set, describes structuredContent.
+    annotations: Optional[Dict[str, Any]] = None
+    outputSchema: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -37,6 +43,21 @@ class MCPResource:
     """MCP Resource definition"""
 
     uri: str
+    name: str
+    description: Optional[str] = None
+    mimeType: Optional[str] = None
+
+
+@dataclass
+class MCPResourceTemplate:
+    """MCP Resource template (RFC 6570 URI template), spec 2025-06-18.
+
+    Lets a client construct a resource URI itself (e.g. for a note path it
+    already knows from a tool result) instead of only picking from the
+    concrete list returned by resources/list.
+    """
+
+    uriTemplate: str
     name: str
     description: Optional[str] = None
     mimeType: Optional[str] = None

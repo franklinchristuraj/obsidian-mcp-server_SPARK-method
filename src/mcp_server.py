@@ -39,10 +39,14 @@ class MCPProtocolHandler:
     Handles MCP protocol operations with streaming support
     """
 
+    # Protocol versions this server understands, newest first. The first
+    # entry is offered to clients that don't request a specific version.
+    SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
     def __init__(self):
         self.session_id: Optional[str] = None
         self.session_initialized: bool = False
-        self.protocol_version = "2024-11-05"
+        self.protocol_version = self.SUPPORTED_PROTOCOL_VERSIONS[0]
         self.server_info = {
             "name": "obsidian-mcp-server",
             "version": "2.1.0",
@@ -53,6 +57,14 @@ class MCPProtocolHandler:
                 "Load MCP prompt vault_mcp_agent_guide first."
             ),
         }
+        self.instructions = (
+            "Obsidian vault MCP server. Before doing vault work, fetch the "
+            "'vault_mcp_agent_guide' prompt (prompts/get) - it covers workspaces "
+            "(personal/passion/work), the entity graph tools (resolve_entity, "
+            "get_dossier, build_context, graph/timeline tools), and path/scope "
+            "conventions. Call 'workspaces' first to see which scopes this API "
+            "key can access."
+        )
         self.capabilities = MCPCapabilities(
             tools={"listChanged": False},
             resources={"subscribe": False, "listChanged": False},
@@ -72,6 +84,13 @@ class MCPProtocolHandler:
                     "type": "object",
                     "properties": {},
                     "additionalProperties": False,
+                },
+                annotations={
+                    "title": "Ping",
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
                 },
             )
         ]
@@ -125,6 +144,8 @@ class MCPProtocolHandler:
                 return await self._handle_resources_list(params)
             elif method == MCPMessageType.RESOURCES_READ.value:
                 return await self._handle_resources_read(params)
+            elif method == MCPMessageType.RESOURCES_TEMPLATES_LIST.value:
+                return await self._handle_resources_templates_list(params)
             elif method == MCPMessageType.PROMPTS_LIST.value:
                 return await self._handle_prompts_list(params)
             elif method == MCPMessageType.PROMPTS_GET.value:
@@ -143,18 +164,21 @@ class MCPProtocolHandler:
     async def _handle_initialize(
         self, params: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Handle MCP initialization"""
-        if params:
-            client_info = params.get("clientInfo", {})
-            requested_version = params.get("protocolVersion")
+        """Handle MCP initialization.
 
-            # Validate protocol version compatibility
-            if requested_version and requested_version != self.protocol_version:
-                # For now, accept any version but note the difference
-                pass
+        Per spec, a server that doesn't support the client's requested
+        protocolVersion should respond with a version it does support (rather
+        than silently claiming the client's version) so the client can decide
+        whether to proceed or disconnect.
+        """
+        negotiated_version = self.protocol_version
+        if params:
+            requested_version = params.get("protocolVersion")
+            if requested_version in self.SUPPORTED_PROTOCOL_VERSIONS:
+                negotiated_version = requested_version
 
         return {
-            "protocolVersion": self.protocol_version,
+            "protocolVersion": negotiated_version,
             "capabilities": {
                 "tools": self.capabilities.tools,
                 "resources": self.capabilities.resources,
@@ -162,6 +186,7 @@ class MCPProtocolHandler:
                 "logging": self.capabilities.logging,
             },
             "serverInfo": self.server_info,
+            "instructions": self.instructions,
         }
 
     async def _handle_ping(self, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -176,16 +201,19 @@ class MCPProtocolHandler:
         self, params: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """List available tools"""
-        return {
-            "tools": [
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.inputSchema,
-                }
-                for tool in self.tools
-            ]
-        }
+        tool_dicts = []
+        for tool in self.tools:
+            tool_dict: Dict[str, Any] = {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.inputSchema,
+            }
+            if tool.annotations:
+                tool_dict["annotations"] = tool.annotations
+            if tool.outputSchema:
+                tool_dict["outputSchema"] = tool.outputSchema
+            tool_dicts.append(tool_dict)
+        return {"tools": tool_dicts}
 
     async def _handle_tools_call(
         self, params: Optional[Dict[str, Any]]
@@ -230,7 +258,7 @@ class MCPProtocolHandler:
 
         if tool_name in OBSIDIAN_ROUTED_TOOL_NAMES and obsidian_tools is not None:
             try:
-                return await obsidian_tools.execute_tool(tool_name, arguments)
+                result = await obsidian_tools.execute_tool(tool_name, arguments)
             except Exception as e:
                 return {
                     "content": [
@@ -238,8 +266,20 @@ class MCPProtocolHandler:
                             "type": "text",
                             "text": f"❌ Obsidian tool '{tool_name}' failed: {str(e)}",
                         }
-                    ]
+                    ],
+                    "isError": True,
                 }
+            # Promote the tool's own "metadata" payload (used across the
+            # codebase, e.g. _json_result) to the spec's "structuredContent"
+            # field too, so clients that only look for the standard field
+            # still get typed data instead of having to re-parse the text blob.
+            if (
+                isinstance(result, dict)
+                and "metadata" in result
+                and "structuredContent" not in result
+            ):
+                result["structuredContent"] = result["metadata"]
+            return result
         # Future application routing (e.g. notion_) can be added here
         return {
             "content": [
@@ -247,7 +287,8 @@ class MCPProtocolHandler:
                     "type": "text",
                     "text": f"❌ Unknown tool '{tool_name}'.",
                 }
-            ]
+            ],
+            "isError": True,
         }
 
     async def _handle_resources_list(
@@ -312,6 +353,32 @@ class MCPProtocolHandler:
             # If ObsidianResources fails, provide a helpful error
             raise ValueError(f"Failed to read resource {uri}: {str(e)}")
 
+    async def _handle_resources_templates_list(
+        self, params: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """List RFC 6570 URI templates (spec 2025-06-18) a client can fill in
+        itself, without needing a resources/list round trip first."""
+        try:
+            from .resources.obsidian_resources import get_obsidian_resources
+
+            resources_handler = get_obsidian_resources()
+            templates = resources_handler.list_resource_templates()
+        except Exception as e:
+            print(f"Warning: Could not load resource templates: {e}")
+            templates = []
+
+        return {
+            "resourceTemplates": [
+                {
+                    "uriTemplate": t.uriTemplate,
+                    "name": t.name,
+                    **({"description": t.description} if t.description else {}),
+                    **({"mimeType": t.mimeType} if t.mimeType else {}),
+                }
+                for t in templates
+            ]
+        }
+
     def add_tool(self, tool: MCPTool):
         """Add a new tool to the server"""
         self.tools.append(tool)
@@ -343,6 +410,7 @@ class MCPProtocolHandler:
     def invalidate_resources_cache(self):
         """Force reload of resources on next request"""
         self._resources_loaded = False
+        self.resources = []
 
         # Also invalidate the ObsidianResources cache
         try:
@@ -460,11 +528,6 @@ class MCPProtocolHandler:
         # But we can internally track the initialization state
         self.session_initialized = True
         return None
-
-    def invalidate_resources_cache(self):
-        """Invalidate resources cache to force reload"""
-        self._resources_loaded = False
-        self.resources = []
 
 
 # Global MCP handler instance

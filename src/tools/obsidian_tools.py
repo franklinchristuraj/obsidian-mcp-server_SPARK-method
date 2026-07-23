@@ -207,6 +207,424 @@ def _upsert_events_section(
     return head + new_body, True
 
 
+# MCP 2025-06-18 tool annotations (hints only, not enforced security boundaries).
+# Every entry: readOnlyHint (no vault mutation), destructiveHint (may overwrite/
+# remove existing data), idempotentHint (repeat call with same args -> same
+# end state), openWorldHint (talks to something outside this local vault).
+_READ_ONLY = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+_TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
+    "workspaces": {"title": "List Workspaces", **_READ_ONLY},
+    "vault_structure": {"title": "Vault Structure", **_READ_ONLY},
+    "list_notes": {"title": "List Notes", **_READ_ONLY},
+    "list_journal": {"title": "List Journal Notes", **_READ_ONLY},
+    "search": {"title": "Search Notes", **_READ_ONLY},
+    "read_note": {"title": "Read Note", **_READ_ONLY},
+    "note_exists": {"title": "Check Note Exists", **_READ_ONLY},
+    "resolve_entity": {"title": "Resolve Entity", **_READ_ONLY},
+    "query_frontmatter": {"title": "Query Frontmatter", **_READ_ONLY},
+    "get_dossier": {"title": "Get Dossier", **_READ_ONLY},
+    "get_backlinks": {"title": "Get Backlinks", **_READ_ONLY},
+    "get_neighbors": {"title": "Get Neighbors", **_READ_ONLY},
+    "find_path": {"title": "Find Path", **_READ_ONLY},
+    "graph_health": {"title": "Graph Health", **_READ_ONLY},
+    "timeline": {"title": "Timeline", **_READ_ONLY},
+    "last_touch": {"title": "Last Touch", **_READ_ONLY},
+    "build_context": {"title": "Build Context", **_READ_ONLY},
+    "lint_vault": {
+        # fix=false by default (the common case) but the same tool call can
+        # mutate the vault when fix=true, so it cannot be readOnlyHint=True.
+        "title": "Lint Vault",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    "create_note": {
+        "title": "Create Note",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "update_note": {
+        "title": "Update Note",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    "append_note": {
+        "title": "Append to Note",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "delete_note": {
+        "title": "Delete Note",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    "capture": {
+        "title": "Capture",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "create_event": {
+        "title": "Create Event",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+}
+
+# MCP 2025-06-18 outputSchema per tool, describing the structuredContent each
+# tool's "metadata" payload is promoted to (see mcp_server.py::_handle_tools_call).
+# Kept intentionally shallow (top-level shape only, additionalProperties
+# allowed throughout) rather than exhaustively typed - several tools
+# (resolve_entity, get_dossier, timeline, last_touch, build_context) can also
+# short-circuit into a disambiguation payload ({disambiguation_required,
+# query, candidates}), so none of their fields are marked "required".
+_ENTITY_REF = {
+    "type": "object",
+    "additionalProperties": True,
+    "properties": {
+        "path": {"type": "string"},
+        "display": {"type": "string"},
+        "entity_type_of_target": {"type": "string"},
+        "agent_context_of_target": {"type": "string"},
+        "event_date": {"type": "string"},
+    },
+}
+_DISAMBIGUATION_PROPS = {
+    "disambiguation_required": {"type": "boolean"},
+    "query": {"type": "string"},
+    "candidates": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "entity_type": {"type": "string"},
+                "match": {"type": "string"},
+            },
+        },
+    },
+}
+_TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "workspaces": {
+        "type": "object",
+        "properties": {
+            "scopes": {"type": "array", "items": {"type": "string"}},
+            "role": {"type": "string"},
+            "display_name": {"type": "string"},
+        },
+        "required": ["scopes"],
+    },
+    "vault_structure": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "root_path": {"type": "string"},
+            "total_notes": {"type": "integer"},
+            "total_folders": {"type": "integer"},
+            "folders": {"type": "array", "items": {"type": "object"}},
+            "cached": {"type": "boolean"},
+        },
+        "required": ["total_notes", "total_folders", "folders"],
+    },
+    "list_notes": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "total_notes": {"type": "integer"},
+            "folder": {"type": "string"},
+            "notes": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["total_notes", "notes"],
+    },
+    "list_journal": {
+        "type": "object",
+        "properties": {
+            "startDate": {"type": "string"},
+            "endDate": {"type": "string"},
+            "notes": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["startDate", "endDate", "notes"],
+    },
+    "search": {
+        "type": "object",
+        "properties": {
+            "keyword": {"type": "string"},
+            "folder": {"type": ["string", "null"]},
+            "case_sensitive": {"type": "boolean"},
+            "total_found": {"type": "integer"},
+            "limit": {"type": "integer"},
+            "matching_notes": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["total_found", "matching_notes"],
+    },
+    "read_note": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "content_length": {"type": "integer"},
+            "size": {"type": "integer"},
+            "modified": {"type": "string"},
+            "created": {"type": ["string", "null"]},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["path", "scope", "content_length"],
+    },
+    "note_exists": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "exists": {"type": "boolean"},
+            "matches": {"type": "array", "items": {"type": "object"}},
+            "scope": {"type": "string"},
+            "path": {"type": "string"},
+            "lastModified": {"type": "string"},
+        },
+        "required": ["exists", "matches"],
+    },
+    "create_note": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "path_normalized": {"type": "boolean"},
+            "content_length": {"type": "integer"},
+            "created_at": {"type": "string"},
+            "folders_created": {"type": "boolean"},
+            "template_applied": {"type": "boolean"},
+            "template_source": {"type": "string"},
+            "note_type": {"type": ["string", "null"]},
+            "validation_warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["path", "scope", "content_length"],
+    },
+    "update_note": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "content_length": {"type": "integer"},
+            "updated_at": {"type": "string"},
+            "format_preserved": {"type": "boolean"},
+            "validation_warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["path", "scope", "content_length"],
+    },
+    "append_note": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "appended_length": {"type": "integer"},
+            "separator": {"type": "string"},
+            "appended_at": {"type": "string"},
+        },
+        "required": ["path", "scope", "appended_length"],
+    },
+    "delete_note": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "deleted_at": {"type": "string"},
+        },
+        "required": ["path", "scope"],
+    },
+    "resolve_entity": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **_DISAMBIGUATION_PROPS,
+            "canonical_path": {"type": "string"},
+            "scope": {"type": "string"},
+            "entity_type": {"type": "string"},
+            "aliases": {"type": "array", "items": {"type": "string"}},
+            "agent_context": {"type": "string"},
+            "key_frontmatter": {"type": "object"},
+            "connections": {"type": "array", "items": _ENTITY_REF},
+            "backlinks": {"type": "array", "items": {"type": "object"}},
+            "events": {"type": "array", "items": _ENTITY_REF},
+            "recent_mentions": {"type": "array", "items": {"type": "object"}},
+        },
+    },
+    "query_frontmatter": {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+            "returned": {"type": "integer"},
+            "truncated": {"type": "boolean"},
+            "results": {"type": "array", "items": {"type": "object"}},
+            "note": {"type": "string"},
+        },
+        "required": ["count", "returned", "truncated", "results"],
+    },
+    "get_dossier": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **_DISAMBIGUATION_PROPS,
+            "entity": {"type": "object"},
+            "connections": {"type": "array", "items": {"type": "object"}},
+            "backlinks": {"type": "array", "items": {"type": "object"}},
+            "events": {"type": "array", "items": {"type": "object"}},
+            "recent_mentions": {"type": "array", "items": {"type": "object"}},
+            "open_questions": {"type": "string"},
+            "depth": {"type": "integer"},
+            "since": {"type": "string"},
+            "changes_since": {"type": "object"},
+        },
+    },
+    "lint_vault": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "summary": {"type": "object"},
+            "missing_required_frontmatter": {"type": "array", "items": {"type": "string"}},
+            "missing_connections_section": {"type": "array", "items": {"type": "string"}},
+            "broken_wikilinks": {"type": "array", "items": {"type": "object"}},
+            "invalid_event_type": {"type": "array", "items": {"type": "string"}},
+            "orphan_entities": {"type": "array", "items": {"type": "string"}},
+            "alias_collisions": {"type": "array", "items": {"type": "object"}},
+            "fix_report": {"type": "object"},
+        },
+        "required": ["summary"],
+    },
+    "get_backlinks": {
+        "type": "object",
+        "properties": {
+            "resolved": {"type": "boolean"},
+            "canonical_path": {"type": "string"},
+            "query": {"type": "string"},
+            "backlinks": {"type": "array", "items": {"type": "object"}},
+            "count": {"type": "integer"},
+        },
+        "required": ["resolved", "backlinks", "count"],
+    },
+    "get_neighbors": {
+        "type": "object",
+        "properties": {
+            "resolved": {"type": "boolean"},
+            "canonical_path": {"type": "string"},
+            "query": {"type": "string"},
+            "neighbors": {"type": "array", "items": {"type": "object"}},
+            "count": {"type": "integer"},
+        },
+        "required": ["resolved", "neighbors", "count"],
+    },
+    "find_path": {
+        "type": "object",
+        "properties": {
+            "resolved": {"type": "boolean"},
+            "found": {"type": "boolean"},
+            "path": {"type": "array", "items": {"type": "object"}},
+            "hops": {"type": "integer"},
+        },
+        "required": ["resolved", "found", "path"],
+    },
+    "graph_health": {
+        "type": "object",
+        "properties": {
+            "lint_summary": {"type": "object"},
+            "graph": {"type": "object"},
+            "missing_entities": {"type": "array", "items": {"type": "object"}},
+            "missing_entities_count": {"type": "integer"},
+        },
+        "required": ["lint_summary", "graph", "missing_entities_count"],
+    },
+    "timeline": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **_DISAMBIGUATION_PROPS,
+            "canonical_path": {"type": "string"},
+            "scope": {"type": "string"},
+            "start": {"type": ["string", "null"]},
+            "end": {"type": ["string", "null"]},
+            "items": {"type": "array", "items": {"type": "object"}},
+            "count": {"type": "integer"},
+        },
+    },
+    "last_touch": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **_DISAMBIGUATION_PROPS,
+            "canonical_path": {"type": "string"},
+            "last_touch": {"type": ["object", "null"]},
+            "fallback_to_note_modified": {"type": "boolean"},
+        },
+    },
+    "build_context": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            **_DISAMBIGUATION_PROPS,
+            "resolved": {"type": "boolean"},
+            "seed": {"type": "object"},
+            "token_budget": {"type": "integer"},
+            "tokens_used": {"type": "integer"},
+            "truncated": {"type": "boolean"},
+            "context_pack": {"type": "array", "items": {"type": "object"}},
+            "source_manifest": {"type": "array", "items": {"type": "string"}},
+        },
+    },
+    "capture": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "filename": {"type": "string"},
+            "title": {"type": "string"},
+            "capture_type": {"type": "string"},
+            "source": {"type": "string"},
+            "spark": {"type": "string"},
+            "status": {"type": "string"},
+            "captured": {"type": "string"},
+            "created_at": {"type": "string"},
+        },
+        "required": ["path", "filename", "capture_type", "status"],
+    },
+    "create_event": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "event_stem": {"type": "string"},
+            "event_type": {"type": "string"},
+            "event_date": {"type": "string"},
+            "customer": {"type": ["string", "null"]},
+            "organizations": {"type": "array", "items": {"type": "string"}},
+            "participants": {"type": "array", "items": {"type": "string"}},
+            "concepts": {"type": "array", "items": {"type": "string"}},
+            "backrefs_updated": {"type": "boolean"},
+            "backref_results": {"type": "array", "items": {"type": "object"}},
+            "created_at": {"type": "string"},
+        },
+        "required": ["path", "scope", "event_type", "event_date"],
+    },
+}
+
+
 def _scope_schema_read() -> Dict[str, Any]:
     return {
         "type": "string",
@@ -314,6 +732,8 @@ class ObsidianTools:
         def _tool(
             name: str, description: str, properties: Dict[str, Any], required: List[str]
         ) -> MCPTool:
+            annotations = dict(_TOOL_ANNOTATIONS.get(name, {}))
+            annotations.setdefault("title", name)
             return MCPTool(
                 name=name,
                 description=description,
@@ -323,6 +743,8 @@ class ObsidianTools:
                     "required": required,
                     "additionalProperties": False,
                 },
+                annotations=annotations,
+                outputSchema=_TOOL_OUTPUT_SCHEMAS.get(name),
             )
 
         sr = _scope_schema_read()

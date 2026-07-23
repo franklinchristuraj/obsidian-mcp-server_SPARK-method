@@ -11,7 +11,7 @@ import urllib.parse
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from ..types import MCPResource
+from ..types import MCPResource, MCPResourceTemplate
 from ..clients.obsidian_client import ObsidianClient, ObsidianAPIError
 from ..scope import KNOWN_SCOPES
 
@@ -205,6 +205,27 @@ class ObsidianResources:
                 )
 
         return resources
+
+    def list_resource_templates(self) -> List[MCPResourceTemplate]:
+        """RFC 6570 URI templates a client can fill in itself, instead of only
+        picking from the concrete URIs discover_resources() enumerates (which
+        means walking the whole vault). A client that already has a workspace
+        -relative path (e.g. from a tool's `path`/`canonical_path` field) can
+        build `obsidian://notes/{+path}` directly without a resources/list
+        round trip."""
+        return [
+            MCPResourceTemplate(
+                uriTemplate=f"{self.uri_scheme}://{self.uri_authority}/{{+path}}",
+                name="Vault note or folder",
+                description=(
+                    "A note (text/markdown) or folder (application/json listing) "
+                    "at a vault-relative path, e.g. work/entities/customer/gojob.md. "
+                    "Same paths tools use, prefixed with the workspace (personal/"
+                    "passion/work). Not scope-filtered by API key - prefer tools "
+                    "when the connection is scope-restricted."
+                ),
+            )
+        ]
 
     # =================== Resource Content Reading ===================
 
