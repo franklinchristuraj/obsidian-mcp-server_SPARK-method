@@ -2,6 +2,7 @@
 Obsidian MCP Tools Implementation
 Workspace-scoped vault tools using ObsidianClient
 """
+import asyncio
 import functools
 import json
 import os
@@ -20,15 +21,17 @@ from src.scope import (
     scoped_list_folder,
     strip_scope_prefix,
 )
-from src.vault_intelligence.corpus import VaultCorpus
+from src.vault_intelligence.corpus import ConcurrentModificationError, VaultCorpus
 from src.vault_intelligence.entity_index import EntityIndex
 from src.vault_intelligence.tools import VaultIntelligenceTools
 from src.vault_intelligence.parser import (
     EVENT_TYPES,
     ParsedNote,
     extract_all_wikilink_targets,
+    normalize_link_target,
     normalize_path_key,
     required_fm_for,
+    rewrite_wikilinks,
 )
 from ..types import MCPTool
 from ..utils.list_notes_time import note_mtime_in_window, resolve_list_notes_time_window
@@ -272,6 +275,13 @@ _TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
         "idempotentHint": True,
         "openWorldHint": False,
     },
+    "rename_note": {
+        "title": "Rename/Move Note",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
     "capture": {
         "title": "Capture",
         "readOnlyHint": False,
@@ -449,6 +459,18 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "deleted_at": {"type": "string"},
         },
         "required": ["path", "scope"],
+    },
+    "rename_note": {
+        "type": "object",
+        "properties": {
+            "old_path": {"type": "string"},
+            "new_path": {"type": "string"},
+            "scope": {"type": "string"},
+            "backlinks_updated": {"type": "boolean"},
+            "updated_notes": {"type": "array", "items": {"type": "string"}},
+            "renamed_at": {"type": "string"},
+        },
+        "required": ["old_path", "new_path", "scope", "updated_notes"],
     },
     "resolve_entity": {
         "type": "object",
@@ -659,6 +681,7 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "append_note": "append_note",
     "note_exists": "check_note_exists",
     "delete_note": "delete_note",
+    "rename_note": "rename_note",
     "resolve_entity": "resolve_entity",
     "query_frontmatter": "query_frontmatter",
     "get_dossier": "get_dossier",
@@ -920,6 +943,23 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             "scope": sw,
         }
 
+        rename_props = {
+            "path": {"type": "string", "description": "Current note path relative to workspace"},
+            "new_path": {
+                "type": "string",
+                "description": "New note path relative to the same workspace",
+            },
+            "scope": sw,
+            "update_backlinks": {
+                "type": "boolean",
+                "description": (
+                    "Rewrite [[wikilinks]] elsewhere in the workspace that pointed at "
+                    "the old path/stem to the new stem (default true)."
+                ),
+                "default": True,
+            },
+        }
+
         tools: List[MCPTool] = [
             _tool(
                 "workspaces",
@@ -993,6 +1033,17 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "Delete a note (scope required if key has multiple workspaces).",
                 delete_props,
                 ["path"],
+            ),
+            _tool(
+                "rename_note",
+                (
+                    "Move/rename a note within its workspace. Rewrites [[wikilinks]] "
+                    "elsewhere in the workspace that pointed at the old path/stem "
+                    "(update_backlinks=true, default) so the graph doesn't end up "
+                    "with stale links until the next lint_vault(fix=True)."
+                ),
+                rename_props,
+                ["path", "new_path"],
             ),
             _tool(
                 "resolve_entity",
@@ -1712,7 +1763,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             entity_index: Optional[EntityIndex] = None
             if "entities/" in path:
                 vi = self._get_vault_intel()
-                all_notes = vi.corpus.load_scope([write_scope], include_sections=False)
+                all_notes = await asyncio.to_thread(vi.corpus.load_scope, [write_scope], include_sections=False)
                 entities = [n for n in all_notes if n.path.startswith("entities/")]
                 _check_alias_collisions(path, final_content, entities)
                 entity_index = EntityIndex(all_notes)
@@ -1851,7 +1902,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             entity_index: Optional[EntityIndex] = None
             if "entities/" in rel_path:
                 vi = self._get_vault_intel()
-                all_notes = vi.corpus.load_scope([write_scope], include_sections=False)
+                all_notes = await asyncio.to_thread(vi.corpus.load_scope, [write_scope], include_sections=False)
                 entities = [n for n in all_notes if n.path.startswith("entities/")]
                 _check_alias_collisions(rel_path, final_content, entities)
                 entity_index = EntityIndex(all_notes)
@@ -1984,6 +2035,130 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             raise ValueError(f"Failed to delete note: {e.message}")
         except Exception as e:
             raise ValueError(f"Unexpected error deleting note: {str(e)}")
+
+    @_write_locked
+    async def rename_note(
+        self,
+        path: str,
+        new_path: str,
+        scope: Optional[str] = None,
+        update_backlinks: bool = True,
+    ) -> Dict[str, Any]:
+        """Move/rename a note within its workspace, rewriting inbound wikilinks
+        that pointed at its old path/stem so the graph doesn't silently
+        orphan (the old delete+create workaround left every backlink broken
+        until the next lint_vault(fix=True))."""
+        if not self.client:
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
+
+        from ..utils.template_utils import template_detector
+
+        try:
+            old_full, old_rel, write_scope = self._resolve_note_path_for_write(
+                path, scope, normalize=True
+            )
+            forbid_scope_prefix_in_agent_path(new_path)
+            new_rel = template_detector.normalize_folder_path(new_path)
+            ctx = get_effective_workspace_context()
+            allow = tuple(ctx.allowed_scopes)
+            try:
+                new_full = resolve_scoped_path(new_rel, write_scope, allow)
+            except (ValueError, PermissionError) as e:
+                raise self._access_error(e) from e
+
+            if normalize_path_key(old_rel) == normalize_path_key(new_rel):
+                raise ValueError("new_path resolves to the same note as path")
+
+            if not await self.client.note_exists(old_full):
+                raise ValueError("Note not found")
+            if await self.client.note_exists(new_full):
+                raise ValueError(f"A note already exists at {new_rel}")
+
+            content = await self.client.read_note(old_full)
+            await self.client.create_note(new_full, content, create_folders=True)
+            try:
+                await self.client.delete_note(old_full)
+            except Exception:
+                # Copy succeeded but the old file couldn't be removed - undo
+                # the copy rather than leaving the note duplicated at both
+                # paths, and surface the original delete failure.
+                try:
+                    await self.client.delete_note(new_full)
+                except Exception:
+                    pass
+                raise
+
+            old_stem = Path(old_rel).stem
+            new_stem = Path(new_rel).stem
+            rewrite_targets = {
+                normalize_link_target(old_stem): new_stem,
+                normalize_link_target(old_rel): new_stem,
+            }
+
+            updated_notes: List[str] = []
+            if update_backlinks:
+                vi = self._get_vault_intel()
+                corpus_notes = await asyncio.to_thread(vi.corpus.load_scope, [write_scope])
+                old_key = normalize_path_key(old_rel)
+                for note in corpus_notes:
+                    if normalize_path_key(note.path) == old_key:
+                        continue
+                    if not any(
+                        normalize_link_target(link) in rewrite_targets
+                        for link in note.outlinks
+                    ):
+                        continue
+                    try:
+                        current_text = await asyncio.to_thread(
+                            vi.corpus.read_text, note.scope, note.path
+                        )
+                        mtime = await asyncio.to_thread(
+                            vi.corpus.stat_mtime, note.scope, note.path
+                        )
+                        new_text, n = rewrite_wikilinks(current_text, rewrite_targets)
+                        if n:
+                            await asyncio.to_thread(
+                                vi.corpus.write_note,
+                                note.scope,
+                                note.path,
+                                new_text,
+                                create_folders=False,
+                                expected_mtime=mtime,
+                            )
+                            updated_notes.append(note.path)
+                    except ConcurrentModificationError:
+                        # Best-effort: a concurrent edit raced this rewrite;
+                        # lint_vault(fix=True) will catch the stale link later.
+                        continue
+                    except OSError:
+                        continue
+
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"✅ Renamed {old_rel} -> {new_rel} (scope={write_scope})\n"
+                            f"Backlinks updated: {len(updated_notes)}"
+                        ),
+                    }
+                ],
+                "metadata": {
+                    "old_path": old_rel,
+                    "new_path": new_rel,
+                    "scope": write_scope,
+                    "backlinks_updated": update_backlinks,
+                    "updated_notes": updated_notes,
+                    "renamed_at": datetime.now().isoformat(),
+                },
+            }
+
+        except ObsidianAPIError as e:
+            if e.status_code == 404:
+                raise ValueError("Note not found")
+            if e.status_code == 409:
+                raise ValueError(f"A note already exists at {new_path}")
+            raise ValueError(f"Failed to rename note: {e.message}")
 
     async def list_notes(
         self,
@@ -2801,7 +2976,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         backref_results: List[Dict[str, str]] = []
         if update_backrefs:
             vi = self._get_vault_intel()
-            corpus_notes = vi.corpus.load_scope([write_scope], include_sections=False)
+            corpus_notes = await asyncio.to_thread(vi.corpus.load_scope, [write_scope], include_sections=False)
             name_index = vi.corpus.index_by_name(corpus_notes)
             targets: List[str] = []
             if cust_slug:

@@ -43,6 +43,13 @@ class MCPProtocolHandler:
     # entry is offered to clients that don't request a specific version.
     SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
+    # Page sizes for cursor pagination (spec 2025-06-18). Tools page size is
+    # set well above the current tool count so today's non-paginating clients
+    # keep getting the full list in one response; resources page size is set
+    # to actually chunk the (currently ~800-item) resources/list response.
+    TOOLS_PAGE_SIZE = 200
+    RESOURCES_PAGE_SIZE = 200
+
     def __init__(self):
         self.session_id: Optional[str] = None
         self.session_initialized: bool = False
@@ -70,6 +77,7 @@ class MCPProtocolHandler:
             resources={"subscribe": False, "listChanged": False},
             prompts={"listChanged": False},
             logging={},
+            completions={},
         )
 
         # Register available tools from obsidian_tools
@@ -150,6 +158,8 @@ class MCPProtocolHandler:
                 return await self._handle_prompts_list(params)
             elif method == MCPMessageType.PROMPTS_GET.value:
                 return await self._handle_prompts_get(params)
+            elif method == MCPMessageType.COMPLETION_COMPLETE.value:
+                return await self._handle_completion_complete(params)
             elif method == MCPMessageType.NOTIFICATIONS_INITIALIZED.value:
                 return await self._handle_notifications_initialized(params)
             else:
@@ -184,6 +194,7 @@ class MCPProtocolHandler:
                 "resources": self.capabilities.resources,
                 "prompts": self.capabilities.prompts,
                 "logging": self.capabilities.logging,
+                "completions": self.capabilities.completions,
             },
             "serverInfo": self.server_info,
             "instructions": self.instructions,
@@ -197,12 +208,34 @@ class MCPProtocolHandler:
             "serverInfo": self.server_info,
         }
 
+    @staticmethod
+    def _paginate(items: List[Any], cursor: Optional[str], page_size: int) -> tuple:
+        """Cursor pagination (spec 2025-06-18): cursor is an opaque offset the
+        client must treat as such (it's just a stringified index here, but
+        callers should not parse it), returned in nextCursor and echoed back
+        on the following request. Missing/None cursor starts from the top."""
+        start = 0
+        if cursor is not None:
+            try:
+                start = int(cursor)
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid cursor: {cursor!r}")
+            if start < 0 or start > len(items):
+                raise ValueError(f"Invalid cursor: {cursor!r}")
+        end = start + page_size
+        page = items[start:end]
+        next_cursor = str(end) if end < len(items) else None
+        return page, next_cursor
+
     async def _handle_tools_list(
         self, params: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """List available tools"""
+        cursor = (params or {}).get("cursor")
+        page, next_cursor = self._paginate(self.tools, cursor, self.TOOLS_PAGE_SIZE)
+
         tool_dicts = []
-        for tool in self.tools:
+        for tool in page:
             tool_dict: Dict[str, Any] = {
                 "name": tool.name,
                 "description": tool.description,
@@ -213,7 +246,11 @@ class MCPProtocolHandler:
             if tool.outputSchema:
                 tool_dict["outputSchema"] = tool.outputSchema
             tool_dicts.append(tool_dict)
-        return {"tools": tool_dicts}
+
+        result: Dict[str, Any] = {"tools": tool_dicts}
+        if next_cursor is not None:
+            result["nextCursor"] = next_cursor
+        return result
 
     async def _handle_tools_call(
         self, params: Optional[Dict[str, Any]]
@@ -298,7 +335,10 @@ class MCPProtocolHandler:
         # Load resources dynamically from vault
         await self._ensure_resources_loaded()
 
-        return {
+        cursor = (params or {}).get("cursor")
+        page, next_cursor = self._paginate(self.resources, cursor, self.RESOURCES_PAGE_SIZE)
+
+        result: Dict[str, Any] = {
             "resources": [
                 {
                     "uri": resource.uri,
@@ -306,9 +346,12 @@ class MCPProtocolHandler:
                     "description": resource.description,
                     "mimeType": resource.mimeType,
                 }
-                for resource in self.resources
+                for resource in page
             ]
         }
+        if next_cursor is not None:
+            result["nextCursor"] = next_cursor
+        return result
 
     async def _handle_resources_read(
         self, params: Optional[Dict[str, Any]]
@@ -516,6 +559,60 @@ class MCPProtocolHandler:
             }
         except Exception as e:
             raise ValueError(f"Failed to get prompt {name}: {str(e)}")
+
+    # Static argument-name -> candidate list for prompts whose completion
+    # set doesn't depend on live vault state.
+    _PROMPT_ARG_ENUMS: Dict[tuple, List[str]] = {
+        ("note_template_system", "note_type"): [
+            "daily", "project", "area", "seed", "resource", "knowledge",
+        ],
+    }
+
+    async def _handle_completion_complete(
+        self, params: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """completion/complete (spec 2025-06-18): argument-value autocomplete
+        for prompts. Only ref/prompt is supported (this server has no
+        resource templates with fillable variables beyond the note path,
+        which isn't a meaningful completion target)."""
+        params = params or {}
+        ref = params.get("ref") or {}
+        argument = params.get("argument") or {}
+        arg_name = argument.get("name")
+        arg_value = str(argument.get("value") or "")
+
+        candidates: List[str] = []
+        if ref.get("type") == "ref/prompt":
+            prompt_name = ref.get("name")
+            static = self._PROMPT_ARG_ENUMS.get((prompt_name, arg_name))
+            if static is not None:
+                candidates = static
+            elif prompt_name == "meeting_prep_workflow" and arg_name == "entity_name":
+                candidates = await self._complete_entity_names()
+
+        matches = [c for c in candidates if c.lower().startswith(arg_value.lower())]
+        return {
+            "completion": {
+                "values": matches[:100],
+                "total": len(matches),
+                "hasMore": len(matches) > 100,
+            }
+        }
+
+    async def _complete_entity_names(self) -> List[str]:
+        """Live work-entity name candidates (filename stems), best-effort:
+        empty list if no vault is configured or the scan fails, rather than
+        erroring out a completion request."""
+        try:
+            from pathlib import Path
+
+            from .tools.obsidian_tools import obsidian_tools
+
+            vi = obsidian_tools._get_vault_intel()
+            entities = await vi._entity_notes(None)
+            return sorted({Path(n.path).stem for n in entities})
+        except Exception:
+            return []
 
     async def _handle_notifications_initialized(
         self, params: Optional[Dict[str, Any]]

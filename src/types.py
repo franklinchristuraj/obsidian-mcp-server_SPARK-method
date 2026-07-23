@@ -19,6 +19,7 @@ class MCPMessageType(Enum):
     RESOURCES_TEMPLATES_LIST = "resources/templates/list"
     PROMPTS_LIST = "prompts/list"
     PROMPTS_GET = "prompts/get"
+    COMPLETION_COMPLETE = "completion/complete"
     PING = "ping"
     # Notifications
     NOTIFICATIONS_INITIALIZED = "notifications/initialized"
@@ -84,6 +85,7 @@ class MCPCapabilities:
     resources: Dict[str, Any] = None
     prompts: Dict[str, Any] = None
     logging: Dict[str, Any] = None
+    completions: Dict[str, Any] = None
 
     def __post_init__(self):
         if self.tools is None:
@@ -94,3 +96,5 @@ class MCPCapabilities:
             self.prompts = {}
         if self.logging is None:
             self.logging = {}
+        if self.completions is None:
+            self.completions = {}

@@ -1,6 +1,7 @@
 """Vault intelligence MCP tools: resolve_entity, query_frontmatter, get_dossier, lint_vault."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -148,22 +149,30 @@ class VaultIntelligenceTools:
                 raise ValueError("Access denied") from e
             raise ValueError(str(e)) from e
 
-    def _entity_notes(self, scope: Optional[str]) -> List[Any]:
+    async def _entity_notes(self, scope: Optional[str]) -> List[Any]:
         scopes = self._resolve_scopes(scope)
         notes: List[Any] = []
         for s in scopes:
-            notes.extend(self.corpus.load_scope([s], folder="entities"))
+            # load_scope does a filesystem walk + stat/parse per file (only
+            # re-parsing what changed, but always re-listing the directory) -
+            # a real blocking syscall cost, especially on network/cloud-synced
+            # vaults. Off the event loop so one large scan doesn't stall every
+            # other concurrent request on this single-worker server.
+            notes.extend(await asyncio.to_thread(self.corpus.load_scope, [s], folder="entities"))
         return notes
 
-    def _all_notes(
+    async def _all_notes(
         self,
         scope: Optional[str],
         folder: Optional[str] = None,
         *,
         include_sections: bool = True,
     ) -> List[Any]:
-        return self.corpus.load_scope(
-            self._resolve_scopes(scope), folder=folder, include_sections=include_sections
+        return await asyncio.to_thread(
+            self.corpus.load_scope,
+            self._resolve_scopes(scope),
+            folder=folder,
+            include_sections=include_sections,
         )
 
     def _resolve_link(
@@ -272,7 +281,7 @@ class VaultIntelligenceTools:
         }
 
     async def resolve_entity(self, name: str, scope: Optional[str] = None) -> Dict[str, Any]:
-        entities = self._entity_notes(scope)
+        entities = await self._entity_notes(scope)
         if not entities:
             raise ValueError("No entity cards found in scope")
 
@@ -290,7 +299,7 @@ class VaultIntelligenceTools:
         if CONNECTIONS_HEADING not in match.sections:
             logger.warning("Entity %s missing ## Connections section", match.path)
 
-        corpus_notes = self._all_notes(scope, include_sections=False)
+        corpus_notes = await self._all_notes(scope, include_sections=False)
         notes_by_key = self.corpus.index_by_path(corpus_notes)
         name_index = self.corpus.index_by_name(corpus_notes)
 
@@ -376,7 +385,7 @@ class VaultIntelligenceTools:
         if not filters and not tag:
             raise ValueError("Provide filters and/or tag")
 
-        notes = self._all_notes(scope, folder=folder)
+        notes = await self._all_notes(scope, folder=folder)
         results: List[dict] = []
 
         for note in notes:
@@ -430,7 +439,7 @@ class VaultIntelligenceTools:
 
         open_questions = entity_note.sections.get(OPEN_QUESTIONS_HEADING, "").strip()
 
-        corpus_notes = self._all_notes(scope, include_sections=False)
+        corpus_notes = await self._all_notes(scope, include_sections=False)
         notes_by_key = self.corpus.index_by_path(corpus_notes)
         name_index = self.corpus.index_by_name(corpus_notes)
         target_key = normalize_path_key(canonical)
@@ -530,7 +539,7 @@ class VaultIntelligenceTools:
                 }
             )
 
-        corpus_notes = self._all_notes(scope, include_sections=False)
+        corpus_notes = await self._all_notes(scope, include_sections=False)
         notes_by_key = self.corpus.index_by_path(corpus_notes)
         name_index = self.corpus.index_by_name(corpus_notes)
         for note in corpus_notes:
@@ -629,12 +638,12 @@ class VaultIntelligenceTools:
         folder: Optional[str] = None,
         fix: bool = False,
     ) -> Dict[str, Any]:
-        notes = self._all_notes(scope, folder=folder or "entities")
+        notes = await self._all_notes(scope, folder=folder or "entities")
         notes_by_key = self.corpus.index_by_path(notes)
         # Resolve bare links against the full scope corpus, not just the linted
         # folder, so event-style [[bare]] links to entities outside the scan
         # (and full-path links) are not falsely reported as broken.
-        corpus_notes = self._all_notes(scope, include_sections=False)
+        corpus_notes = await self._all_notes(scope, include_sections=False)
         resolver_by_key = self.corpus.index_by_path(corpus_notes)
         name_index = self.corpus.index_by_name(corpus_notes)
 
@@ -734,11 +743,16 @@ class VaultIntelligenceTools:
                 if note is None:
                     continue
                 try:
-                    current_text = self.corpus.read_text(note.scope, note.path)
-                    mtime = self.corpus.stat_mtime(note.scope, note.path)
+                    current_text = await asyncio.to_thread(
+                        self.corpus.read_text, note.scope, note.path
+                    )
+                    mtime = await asyncio.to_thread(
+                        self.corpus.stat_mtime, note.scope, note.path
+                    )
                     new_text, n = rewrite_wikilinks(current_text, rewrites)
                     if n:
-                        self.corpus.write_note(
+                        await asyncio.to_thread(
+                            self.corpus.write_note,
                             note.scope,
                             note.path,
                             new_text,
@@ -792,7 +806,7 @@ class VaultIntelligenceTools:
         rel_type: Optional[str] = None,
         direction: str = "both",
     ) -> Dict[str, Any]:
-        entities = self._entity_notes(scope)
+        entities = await self._entity_notes(scope)
         if not entities:
             raise ValueError("No entity cards found in scope")
         match, early = self._match_or_result(name, entities)
@@ -804,7 +818,7 @@ class VaultIntelligenceTools:
         )
 
     async def get_backlinks(self, name: str, scope: Optional[str] = None) -> Dict[str, Any]:
-        entities = self._entity_notes(scope)
+        entities = await self._entity_notes(scope)
         if not entities:
             raise ValueError("No entity cards found in scope")
         match, early = self._match_or_result(name, entities)
@@ -814,7 +828,7 @@ class VaultIntelligenceTools:
         return _json_result(graph.backlinks(match.path))
 
     async def find_path(self, a: str, b: str, scope: Optional[str] = None) -> Dict[str, Any]:
-        entities = self._entity_notes(scope)
+        entities = await self._entity_notes(scope)
         if not entities:
             raise ValueError("No entity cards found in scope")
         match_a, early_a = self._match_or_result(a, entities)
@@ -830,7 +844,7 @@ class VaultIntelligenceTools:
         lint_result = await self.lint_vault(scope=scope, folder="entities", fix=False)
         lint_payload = json.loads(lint_result["content"][0]["text"])
 
-        entities = self._entity_notes(scope)
+        entities = await self._entity_notes(scope)
         graph = GraphIndex(entities)
         entity_index = graph.entity_index
 
@@ -883,7 +897,7 @@ class VaultIntelligenceTools:
         depth: int = 1,
         token_budget: int = 4000,
     ) -> Dict[str, Any]:
-        entities = self._entity_notes(scope)
+        entities = await self._entity_notes(scope)
         if not entities:
             raise ValueError("No entity cards found in scope")
 

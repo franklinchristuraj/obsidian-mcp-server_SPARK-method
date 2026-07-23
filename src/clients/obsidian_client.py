@@ -7,6 +7,7 @@ being alive. Public method names/signatures match the old REST client so
 callers (src/tools/obsidian_tools.py, src/resources/obsidian_resources.py)
 need no changes.
 """
+import asyncio
 import glob
 import os
 import re
@@ -161,7 +162,10 @@ class ObsidianClient:
             raise ValueError("Note path cannot be empty")
         scope, rel = _split_scope(path)
         try:
-            return self.corpus.read_text(scope, rel)
+            # Filesystem read released to a thread: a plain call here blocks
+            # the whole (single-worker) event loop for the syscall's duration,
+            # which is real wall-clock time on a network/cloud-synced vault.
+            return await asyncio.to_thread(self.corpus.read_text, scope, rel)
         except FileNotFoundError:
             raise ObsidianAPIError(f"Note not found: {path}", 404)
 
@@ -170,7 +174,7 @@ class ObsidianClient:
         scope, rel = _split_scope(path)
         full = self.corpus.full_path(scope, rel)
         try:
-            stat = full.stat()
+            stat = await asyncio.to_thread(full.stat)
         except OSError:
             raise ObsidianAPIError(f"Note metadata not found: {path}", 404)
         return NoteMetadata(
@@ -191,10 +195,13 @@ class ObsidianClient:
             raise ValueError("Note path cannot be empty")
         scope, rel = _split_scope(path)
         async with self.corpus.write_lock():
-            if self.corpus.note_exists(scope, rel):
+            exists = await asyncio.to_thread(self.corpus.note_exists, scope, rel)
+            if exists:
                 raise ObsidianAPIError(f"Note already exists: {path}", 409)
             try:
-                self.corpus.write_note(scope, rel, content, create_folders=create_folders)
+                await asyncio.to_thread(
+                    self.corpus.write_note, scope, rel, content, create_folders=create_folders
+                )
             except FileNotFoundError as e:
                 raise ObsidianAPIError(f"Failed to write note {path}: {e}", 404)
         return True
@@ -205,9 +212,12 @@ class ObsidianClient:
             raise ValueError("Note path cannot be empty")
         scope, rel = _split_scope(path)
         async with self.corpus.write_lock():
-            if not self.corpus.note_exists(scope, rel):
+            exists = await asyncio.to_thread(self.corpus.note_exists, scope, rel)
+            if not exists:
                 raise ObsidianAPIError(f"Note not found: {path}", 404)
-            self.corpus.write_note(scope, rel, content, create_folders=False)
+            await asyncio.to_thread(
+                self.corpus.write_note, scope, rel, content, create_folders=False
+            )
         return True
 
     async def append_note(
@@ -218,10 +228,11 @@ class ObsidianClient:
             raise ValueError("Note path cannot be empty")
         scope, rel = _split_scope(path)
         async with self.corpus.write_lock():
-            if not self.corpus.note_exists(scope, rel):
+            exists = await asyncio.to_thread(self.corpus.note_exists, scope, rel)
+            if not exists:
                 raise ObsidianAPIError(f"Note not found: {path}", 404)
             try:
-                self.corpus.append_note(scope, rel, content, separator)
+                await asyncio.to_thread(self.corpus.append_note, scope, rel, content, separator)
             except ConcurrentModificationError:
                 raise ObsidianAPIError(
                     f"Note {path} changed concurrently while appending; please retry", 409
@@ -235,7 +246,7 @@ class ObsidianClient:
         scope, rel = _split_scope(path)
         async with self.corpus.write_lock():
             try:
-                self.corpus.delete_note(scope, rel)
+                await asyncio.to_thread(self.corpus.delete_note, scope, rel)
             except FileNotFoundError:
                 raise ObsidianAPIError(f"Note not found: {path}", 404)
         return True
@@ -276,11 +287,7 @@ class ObsidianClient:
         except OSError:
             return None
 
-    async def list_notes(self, folder: Optional[str] = None, include_tags: bool = False) -> List[NoteMetadata]:
-        """
-        List notes with metadata under `folder` (scope-prefixed, e.g. "work" or
-        "work/entities"). Falls back to a full vault scan if folder is omitted.
-        """
+    def _list_notes_sync(self, folder: Optional[str], include_tags: bool) -> List[NoteMetadata]:
         root = Path(self.vault_path) / folder if folder else Path(self.vault_path)
         notes = []
         for file_path in self._walk_markdown(root):
@@ -288,6 +295,16 @@ class ObsidianClient:
             if note:
                 notes.append(note)
         return notes
+
+    async def list_notes(self, folder: Optional[str] = None, include_tags: bool = False) -> List[NoteMetadata]:
+        """
+        List notes with metadata under `folder` (scope-prefixed, e.g. "work" or
+        "work/entities"). Falls back to a full vault scan if folder is omitted.
+
+        Runs off the event loop: this walks the directory tree and stats (and,
+        with include_tags, reads the head of) every matching file.
+        """
+        return await asyncio.to_thread(self._list_notes_sync, folder, include_tags)
 
     def _extract_tags(self, content: str) -> List[str]:
         """Extract tags from note content"""
@@ -325,8 +342,13 @@ class ObsidianClient:
         `use_cache` is accepted for signature parity but unused: a plain
         os.walk over an ~11MB vault is cheap enough that a separate TTL
         cache layer on top of it isn't worth the complexity (VaultCorpus
-        already mtime-caches parsed note content).
+        already mtime-caches parsed note content). The walk itself still runs
+        off the event loop (see `_get_vault_structure_sync`) since it's a
+        real blocking syscall cost, not a CPU cost.
         """
+        return await asyncio.to_thread(self._get_vault_structure_sync, include_notes)
+
+    def _get_vault_structure_sync(self, include_notes: bool) -> VaultStructure:
         vault_root = Path(self.vault_path)
         all_md_files = self._walk_markdown(vault_root)
 
@@ -448,7 +470,7 @@ class ObsidianClient:
     async def note_exists(self, path: str) -> bool:
         """Check if a note exists"""
         scope, rel = _split_scope(path)
-        return self.corpus.note_exists(scope, rel)
+        return await asyncio.to_thread(self.corpus.note_exists, scope, rel)
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get vault statistics"""

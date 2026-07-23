@@ -142,7 +142,7 @@ class GraphFixtureTestCase(unittest.IsolatedAsyncioTestCase):
             EVENT_MD, encoding="utf-8"
         )
         self.tools = VaultIntelligenceTools(str(root))
-        notes = self.tools._entity_notes("work")
+        notes = await self.tools._entity_notes("work")
         self.graph = GraphIndex(notes)
 
     async def asyncTearDown(self) -> None:

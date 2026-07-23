@@ -91,6 +91,24 @@ class ObsidianPrompts:
                 ),
                 arguments=[],
             ),
+            # Prompt 6: Meeting Prep -> Logging Workflow
+            MCPPrompt(
+                name="meeting_prep_workflow",
+                description=(
+                    "End-to-end workflow for a work meeting: brief before the call "
+                    "(get_dossier/build_context), log it after (create_event). scope=work."
+                ),
+                arguments=[
+                    {
+                        "name": "entity_name",
+                        "description": (
+                            "Optional: the customer/person/partner name this meeting is "
+                            "about, used to make the example calls concrete."
+                        ),
+                        "required": False,
+                    }
+                ],
+            ),
         ]
 
     async def get_prompt_content(
@@ -112,6 +130,8 @@ class ObsidianPrompts:
             return self._get_area_note_template(arguments.get("area_name"))
         elif prompt_name == "format_preservation_rules":
             return self._get_format_preservation_rules()
+        elif prompt_name == "meeting_prep_workflow":
+            return self._get_meeting_prep_workflow(arguments.get("entity_name"))
         else:
             raise ValueError(f"Unknown prompt: {prompt_name}")
 
@@ -384,7 +404,7 @@ Use this template for daily notes in the `06_daily-notes/` folder (under the cho
 ## File Structure
 - **Filename**: `{date_placeholder}.md`
 - **MCP path**: `06_daily-notes/{date_placeholder}.md` with `scope` set to the correct workspace (often `personal`).
-- **On disk**: `{scope}/06_daily-notes/...`
+- **On disk**: `<scope>/06_daily-notes/...` (scope is the workspace you pass, e.g. `personal`)
 
 ## Template:
 
@@ -448,7 +468,7 @@ Use this template for project notes in the `02_projects/` folder inside a worksp
 ## File Structure
 - **Filename**: `{name_placeholder.lower().replace(' ', '-')}.md`
 - **MCP path**: `02_projects/<filename>.md` plus required `scope` when the key has multiple workspaces.
-- **On disk**: `{scope}/02_projects/...`
+- **On disk**: `<scope>/02_projects/...` (scope is the workspace you pass)
 
 ## Template:
 
@@ -525,7 +545,7 @@ Use this template for area notes in the `03_areas/` folder inside a workspace.
 ## File Structure
 - **Filename**: `{name_placeholder.lower().replace(' ', '-')}.md`
 - **MCP path**: `03_areas/<filename>.md` with appropriate `scope` (personal vs passion vs work).
-- **On disk**: `{scope}/03_areas/...`
+- **On disk**: `<scope>/03_areas/...` (scope is the workspace you pass)
 
 ## Template:
 
@@ -690,6 +710,92 @@ When editing existing notes in this vault, follow these critical guidelines:
 - Maintain the metrics structure
 
 Remember: **When in doubt, preserve the existing format** rather than risk breaking the template system.
+"""
+
+    def _get_meeting_prep_workflow(self, entity_name: Optional[str] = None) -> str:
+        """Ties together get_dossier / build_context / create_event into one flow.
+
+        These tools already exist and are individually documented in
+        vault_mcp_agent_guide, but the guide only gives each one a one-line
+        mention - this prompt is the missing "what do I call, in what order,
+        for a whole meeting" walkthrough.
+        """
+        name = entity_name or "<entity name>"
+        return f"""# Meeting Prep -> Logging Workflow (scope=work)
+
+A work meeting has three phases as far as this MCP server is concerned:
+**brief before**, **take the call**, **log after**. This prompt covers the
+tool calls for the first and third phases - the middle one is you.
+
+## 1. Before the meeting: brief yourself
+
+Start with **`get_dossier`** - it wraps `resolve_entity` plus open questions
+and recent cross-vault mentions in one call:
+
+```
+get_dossier(name="{name}", scope="work")
+```
+
+Add `since=<YYYY-MM-DD>` (e.g. the date of your last meeting with them) to
+get a `changes_since` block - only what's new since then, so you don't
+re-read the whole history every time.
+
+If you need more than a dossier - e.g. you're prepping for a call that
+touches several connected entities, or want a token-bounded brief you can
+paste into a prompt - use **`build_context`** instead:
+
+```
+build_context(seed="{name}", scope="work", depth=1, token_budget=4000)
+```
+
+`build_context` expands typed neighbors (engaged_with/attended/attendees)
+first, `related_to` second, mentions last, and returns a `source_manifest`
+so you know exactly what it pulled in. Prefer `get_dossier` for a single
+entity's brief; prefer `build_context` when the prep spans multiple
+connected entities or you have a token budget to respect.
+
+Only fall back to `read_note` on the entity's own card if the dossier's
+`agent_context` and connections aren't enough - most meeting prep should
+not need it.
+
+## 2. During the meeting
+
+(Nothing to call here - this is where you take notes.)
+
+## 3. After the meeting: log it
+
+Use **`create_event`**, not a hand-built note via `create_note` - it builds
+the canonical filename, schema-valid frontmatter, and idempotently updates
+the `## Events` back-ref on every entity the event touches:
+
+```
+create_event(
+    event_type="discovery-call",   # controlled vocabulary - see vault_mcp_agent_guide
+    customer="{name}",              # for customer-facing events
+    participants=["<attendee 1>", "<attendee 2>"],
+    event_date="<YYYY-MM-DD>",       # defaults to today if omitted
+    agent_context="<one-line summary of what happened>",
+    scope="work",
+)
+```
+
+This makes the meeting a first-class graph node: `resolve_entity`,
+`timeline`, and `last_touch` on `{name}` will pick it up immediately, and
+`get_dossier(..., since=<event_date>)` next time will surface it in
+`changes_since`.
+
+## Quick reference
+
+| When | Tool |
+|------|------|
+| Brief on one entity | `get_dossier` |
+| Brief spanning multiple connected entities / token-bounded | `build_context` |
+| Log what happened | `create_event` |
+| "What's gone quiet" follow-up check | `last_touch` |
+| Full interaction history | `timeline` |
+
+For tool argument details and the entity graph model, see
+**`vault_mcp_agent_guide`** (load once per session).
 """
 
 
