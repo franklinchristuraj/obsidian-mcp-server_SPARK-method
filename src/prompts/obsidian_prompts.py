@@ -230,6 +230,7 @@ After intelligence tools return a **path**, call **`read_note`** only when you n
 | Replace body | `update_note` | `scope` if multi-scope key |
 | Append | `append_note` | `scope` if multi-scope key |
 | Delete | `delete_note` | `scope` if multi-scope key |
+| Move/rename | `rename_note` | `path`, `new_path` (same workspace); `scope` if multi-scope key. Rewrites `[[wikilinks]]` elsewhere in the workspace to the new stem (`update_backlinks=true`, default) — prefer this over `create_note`+`delete_note`, which leaves backlinks broken. |
 
 Use only registered tool names (legacy `obs_*` names are not available).
 
@@ -253,6 +254,11 @@ Use only registered tool names (legacy `obs_*` names are not available).
 **Logging a new interaction** (call, build session, demo…):
 1. `create_event(event_type="discovery-call", customer="GoJob", participants=["Julien"], event_date="2026-06-01", scope="work")` — handles filename, frontmatter, and `## Events` back-refs. Prefer this over hand-building an event card with `create_note`.
 
+**Full meeting cycle** (brief → take the call → log it): load the **`meeting_prep_workflow`** prompt — it chains `get_dossier`/`build_context` before the call with `create_event` after, in one documented flow.
+
+**Renaming/moving an entity or note**:
+1. `rename_note(path="entities/customer/old-slug.md", new_path="entities/customer/new-slug.md", scope="work")` — not `delete_note` + `create_note`, which orphans every inbound `[[wikilink]]` until the next `lint_vault(fix=True)`.
+
 **Quick capture** (voice thought, saved post, excerpt — pre-scope inbox):
 1. `capture(content="...", source="voice", capture_type="thought")` — no scope needed. Promotion to a workspace happens at weekly triage.
 
@@ -273,6 +279,8 @@ Vault-side companion docs: **`AGENTS.md`** (MCP tool catalog), **`CLAUDE.md`** (
 ## 8. Template prompts
 
 After this guide, use **`note_template_system`** and the type-specific prompts for YAML and section structure. Template paths on disk include the workspace (e.g. `personal/00_system/templates/...`); MCP **`create_note`** resolves templates using the **`scope`** you pass.
+
+For a whole work meeting (brief before, log after), load **`meeting_prep_workflow`** instead — it walks `get_dossier`/`build_context` and `create_event` as one flow rather than one-line tool mentions.
 
 ---
 *Maintain this prompt when tools or scope rules change; keep it the single agent-facing summary.*
