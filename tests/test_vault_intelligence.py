@@ -679,6 +679,190 @@ class TestCreateEventTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2026-06-01-claroty-discovery-call.md", names)
         self.assertIn("2026-06-01-claroty-discovery-call-2.md", names)
 
+    async def test_create_event_parent_engagement_and_touchpoint(self) -> None:
+        eng_dir = self.root / "work/12_engagements"
+        eng_dir.mkdir(parents=True)
+        parent = eng_dir / "2026-06-01_claroty-build-with-me.md"
+        parent.write_text(
+            "---\ntype: engagement\nengagement_type: build-with-me\n"
+            "customer: \"[[claroty]]\"\nstatus: scheduled\n"
+            "agent_context: Claroty BWM\ntags: [engagement]\n---\n\n"
+            "# Claroty BWM\n\n## Interactions\n\n-\n\n## Next Actions\n\n- [ ] x\n",
+            encoding="utf-8",
+        )
+
+        result = await self.tools.create_event(
+            event_type="build-with-me",
+            event_date="2026-06-01",
+            customer="Claroty",
+            parent_engagement="2026-06-01_claroty-build-with-me",
+            touchpoint_type="kickoff-workshop",
+            channel="workshop",
+            adoption_stage="trial-start",
+            scope="work",
+        )
+        meta = result["metadata"]
+        self.assertEqual(
+            meta["path"],
+            "entities/event/2026-06-01-claroty-kickoff-workshop.md",
+        )
+        self.assertEqual(meta["touchpoint_type"], "kickoff-workshop")
+        self.assertEqual(meta["parent_engagement"], "2026-06-01_claroty-build-with-me")
+
+        event_body = (self.root / "work" / meta["path"]).read_text(encoding="utf-8")
+        self.assertIn("touchpoint_type: kickoff-workshop", event_body)
+        self.assertIn('parent_engagement: "[[2026-06-01_claroty-build-with-me]]"', event_body)
+
+        parent_body = parent.read_text(encoding="utf-8")
+        self.assertIn("[[2026-06-01-claroty-kickoff-workshop]]", parent_body)
+        self.assertIn("## Interactions", parent_body)
+
+    async def test_invalid_touchpoint_type_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.tools.create_event(
+                event_type="build-with-me",
+                touchpoint_type="coffee-chat",
+                scope="work",
+                update_backrefs=False,
+            )
+
+    async def test_technical_deep_dive_event_type_accepted(self) -> None:
+        result = await self.tools.create_event(
+            event_type="technical-deep-dive",
+            event_date="2026-06-02",
+            customer="Claroty",
+            requested_by="Julien",
+            technical_domains=["mcp", "sap-onprem"],
+            scope="work",
+            update_backrefs=False,
+        )
+        body = (self.root / "work" / result["metadata"]["path"]).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("event_type: technical-deep-dive", body)
+        self.assertIn("mcp", body)
+        self.assertIn('requested_by: "[[julien]]"', body)
+
+
+class TestCreateEngagementTool(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        from src.tools.obsidian_tools import ObsidianTools
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        ent = root / "work" / "entities"
+        (ent / "customer").mkdir(parents=True)
+        (ent / "customer" / "claroty.md").write_text(CLAROTY_MD, encoding="utf-8")
+        (root / "work" / "12_engagements").mkdir(parents=True)
+        (root / "work" / "index.md").write_text("# Index\n\n", encoding="utf-8")
+        (root / "work" / "log.md").write_text("# Log\n\n", encoding="utf-8")
+
+        self.tools = ObsidianTools()
+        self.tools.client = _FakeObsidianClient(str(root))
+        self.tools._vault_intel = None
+        self.root = root
+
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_create_bwm_engagement(self) -> None:
+        result = await self.tools.create_engagement(
+            engagement_type="build-with-me",
+            date="2026-07-01",
+            customer="Claroty",
+            trial_start="2026-07-01",
+            trial_end="2026-07-31",
+            next_touch="2026-07-08",
+            next_touch_type="mid-trial-review",
+            champion="Julien",
+            scope="work",
+        )
+        meta = result["metadata"]
+        self.assertEqual(
+            meta["path"], "12_engagements/2026-07-01_claroty-build-with-me.md"
+        )
+        body = (self.root / "work" / meta["path"]).read_text(encoding="utf-8")
+        self.assertIn("engagement_type: build-with-me", body)
+        self.assertIn("trial_start:", body)
+        self.assertIn("2026-07-01", body)
+        self.assertIn("adoption_health: on-track", body)
+        self.assertIn("## Interactions", body)
+        self.assertIn("## High-signal debrief", body)
+
+        index = (self.root / "work/index.md").read_text(encoding="utf-8")
+        self.assertIn("2026-07-01_claroty-build-with-me", index)
+
+    async def test_create_technical_deep_dive_requires_owning_ve(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.tools.create_engagement(
+                engagement_type="technical-deep-dive",
+                customer="Claroty",
+                scope="work",
+                update_index=False,
+            )
+
+        result = await self.tools.create_engagement(
+            engagement_type="technical-deep-dive",
+            date="2026-07-02",
+            customer="Claroty",
+            owning_ve="anna-stafeeva",
+            technical_domains=["mcp"],
+            sales_stage="poc",
+            scope="work",
+            update_index=False,
+        )
+        body = (self.root / "work" / result["metadata"]["path"]).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("engagement_type: technical-deep-dive", body)
+        self.assertIn("mcp", body)
+
+    async def test_invalid_engagement_type_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.tools.create_engagement(
+                engagement_type="lunch-and-learn",
+                customer="Claroty",
+                scope="work",
+                update_index=False,
+            )
+
+    async def test_path_traversal_slug_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.tools.create_engagement(
+                engagement_type="demo",
+                customer="Claroty",
+                slug="../evil",
+                scope="work",
+                update_index=False,
+            )
+
+
+class TestUpsertInteractionsSection(unittest.TestCase):
+    def test_insert_idempotent(self) -> None:
+        from src.tools.obsidian_tools import _upsert_interactions_section
+
+        note = (
+            "---\ntype: engagement\n---\n\n# BWM\n\n## Interactions\n\n-\n\n"
+            "## Next Actions\n\n- [ ] x\n"
+        )
+        out, changed = _upsert_interactions_section(
+            note,
+            "2026-07-01-claroty-kickoff-workshop",
+            "build-with-me",
+            "2026-07-01",
+            touchpoint_type="kickoff-workshop",
+        )
+        self.assertTrue(changed)
+        self.assertIn("[[2026-07-01-claroty-kickoff-workshop]]", out)
+        out2, changed2 = _upsert_interactions_section(
+            out,
+            "2026-07-01-claroty-kickoff-workshop",
+            "build-with-me",
+            "2026-07-01",
+            touchpoint_type="kickoff-workshop",
+        )
+        self.assertFalse(changed2)
+
 
 class TestWriteTimeValidation(unittest.IsolatedAsyncioTestCase):
     """Alias-collision blocking + unresolved-link warnings on create_note/update_note."""

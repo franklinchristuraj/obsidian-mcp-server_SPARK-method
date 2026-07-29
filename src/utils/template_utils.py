@@ -20,6 +20,7 @@ class TemplateDetector:
             "04_resources": "resource",
             "05_knowledge": "knowledge",
             "11_work-meeting-notes": "meeting-note",
+            "12_engagements": "engagement",
             # Event entity cards (work knowledge graph). More specific than the
             # bare "entities" prefix so only the event subfolder is scaffolded.
             "entities/event": "event",
@@ -35,7 +36,15 @@ class TemplateDetector:
             "04_resources": "00_system/templates/resource.md",
             "05_knowledge": "00_system/templates/knowledge.md",
             "06_daily-notes": "00_system/templates/daily-journal.md",
+            "12_engagements": "00_system/templates/ve-engagement.md",
             "entities/event": "00_system/templates/event_template.md",
+        }
+
+        # Engagement subtype templates (selected by engagement_type, not folder).
+        self.engagement_templates = {
+            "build-with-me": "00_system/templates/build-with-me-engagement.md",
+            "technical-deep-dive": "00_system/templates/technical-deep-dive.md",
+            "ve-assist": "00_system/templates/ve-assist.md",
         }
 
         # Folder aliases - map alternative folder names to canonical names
@@ -77,6 +86,10 @@ class TemplateDetector:
             "knowledge": "05_knowledge",
             "kb": "05_knowledge",
             "knowledge-base": "05_knowledge",
+
+            # Engagements
+            "engagements": "12_engagements",
+            "engagement": "12_engagements",
         }
 
     def normalize_folder_path(self, path: str) -> str:
@@ -116,11 +129,36 @@ class TemplateDetector:
                 return note_type
         return None
 
+    def get_engagement_template_path(
+        self,
+        engagement_type: str = "",
+        workspace_scope: Optional[str] = None,
+    ) -> str:
+        """Vault-relative template path for an engagement subtype."""
+        et = (engagement_type or "").strip().lower()
+        template_path = self.engagement_templates.get(
+            et, "00_system/templates/ve-engagement.md"
+        )
+        if workspace_scope:
+            ws = workspace_scope.strip().strip("/")
+            if ws:
+                return f"{ws}/{template_path}"
+        return template_path
+
     def get_template_path_for_folder(
-        self, path: str, workspace_scope: Optional[str] = None
+        self,
+        path: str,
+        workspace_scope: Optional[str] = None,
+        *,
+        engagement_type: str = "",
     ) -> Optional[str]:
         """Vault-relative template path; prefixed with workspace folder when provided."""
         normalized_path = self.normalize_folder_path(path)
+
+        if normalized_path.startswith("12_engagements"):
+            return self.get_engagement_template_path(
+                engagement_type, workspace_scope=workspace_scope
+            )
 
         for folder, template_path in self.vault_templates.items():
             if normalized_path.startswith(folder + "/") or normalized_path.startswith(
@@ -148,10 +186,16 @@ class TemplateDetector:
         return f"{dirname}/{legacy_filename}" if dirname else legacy_filename
 
     def get_template_candidate_paths(
-        self, path: str, workspace_scope: Optional[str] = None
+        self,
+        path: str,
+        workspace_scope: Optional[str] = None,
+        *,
+        engagement_type: str = "",
     ) -> list[str]:
         """Primary vault template path plus legacy _template.md fallback."""
-        primary = self.get_template_path_for_folder(path, workspace_scope)
+        primary = self.get_template_path_for_folder(
+            path, workspace_scope, engagement_type=engagement_type
+        )
         if not primary:
             return []
         candidates = [primary]
@@ -315,11 +359,35 @@ class TemplateDetector:
                 "organizations": [],
                 "participants": [],
                 "concepts": [],
+                "parent_engagement": "",
                 "source_note": "",
+                "touchpoint_type": "",
+                "channel": "",
+                "adoption_stage": "",
+                "requested_by": "",
+                "technical_domains": [],
                 "poc_stage": "",
+                "signal_confidence": "",
                 "last_updated": today,
                 "source_count": 1,
                 "agent_context": "One-line synthesized summary of this interaction",
+            }
+        elif note_type == "engagement":
+            return {
+                "folder": "12_engagements",
+                "type": "engagement",
+                "created": today,
+                "date": today,
+                "status": "prepping",
+                "engagement_type": "",
+                "stage": "",
+                "customer": "",
+                "partner": "",
+                "stakeholders": [],
+                "ams": [],
+                "outcome": "",
+                "tags": ["engagement", "ctx/work"],
+                "agent_context": "VE engagement — prep, run, debrief in one note.",
             }
         else:
             return {"created": today, "type": "note"}
@@ -527,7 +595,63 @@ class TemplateDetector:
 - [[entity-name]] - [How this entity relates to the event]
 
 ## Outcome
-- [What was decided, agreed, or what happens next]"""
+- [What was decided, agreed, or what happens next]
+
+## Signals
+- Customer job /
+- Friction /
+- Product gap /
+- Market signal / (confidence: low|medium|high)"""
+
+        elif note_type == "engagement":
+            return f"""# {note_name or "Engagement"}
+
+**Date:** {datetime.now().strftime("%Y-%m-%d")}
+**Engagement type:**
+**Stage:**
+**Customer:**
+**Partner:**
+
+## Objective
+
+One sentence: what does success look like for this engagement?
+
+## Prep
+
+- [ ] Read customer / partner entity card
+- [ ] Draft 2–3 opening questions
+
+## Agenda
+
+1.
+2.
+3.
+
+## Interactions
+
+-
+
+## Next Actions
+
+- [ ] [due:: ] [priority:: ]
+
+## High-signal debrief
+
+| Field | Capture |
+|-------|---------|
+| Customer job | |
+| Trigger | |
+| Persona | |
+| Current workaround | |
+| Friction / objection | |
+| Decision criterion | |
+| Technical constraint | |
+| Product gap | |
+| Market signal | |
+| Evidence / source | |
+| Confidence | low / medium / high |
+| Reuse / promotion destination | pattern-library / product-feedback / none |
+"""
 
         else:
             return f"""# {note_name or "Note Title"}
@@ -825,6 +949,200 @@ class TemplateDetector:
         extracted["discussion"] = "\n".join(discussion_lines).strip()
 
         return extracted
+
+
+def build_engagement_note_from_data(
+    *,
+    title: str,
+    engagement_type: str,
+    date: str,
+    stage: str = "",
+    customer: str = "",
+    partner: str = "",
+    stakeholders: Optional[list] = None,
+    ams: Optional[list] = None,
+    agent_context: str = "",
+    objective: str = "",
+    trial_start: str = "",
+    trial_end: str = "",
+    champion: str = "",
+    sponsor: str = "",
+    target_use_cases: Optional[list] = None,
+    next_touch: str = "",
+    next_touch_type: str = "",
+    adoption_health: str = "",
+    owning_ve: str = "",
+    requested_by: str = "",
+    sales_stage: str = "",
+    technical_domains: Optional[list] = None,
+) -> Tuple[Dict[str, Any], str]:
+    """Build engagement frontmatter + body for create_engagement fallbacks."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    et = (engagement_type or "").strip().lower()
+    st = (stage or "").strip().lower()
+    if not st:
+        st = "build-with-me" if et == "build-with-me" else "discovery"
+
+    def _as_link(value: str) -> str:
+        v = (value or "").strip()
+        if not v:
+            return ""
+        if v.startswith("[["):
+            return v
+        return f"[[{v}]]"
+
+    def _as_link_list(values: Optional[list]) -> list:
+        out = []
+        for item in values or []:
+            link = _as_link(str(item))
+            if link:
+                out.append(link)
+        return out
+
+    tags = ["engagement", f"engagement_type/{et}", f"stage/{st}", "ctx/work"]
+    frontmatter: Dict[str, Any] = {
+        "type": "engagement",
+        "created": today,
+        "date": date or today,
+        "status": "prepping",
+        "engagement_type": et,
+        "stage": st,
+        "customer": _as_link(customer),
+        "partner": _as_link(partner),
+        "stakeholders": _as_link_list(stakeholders),
+        "ams": _as_link_list(ams),
+        "outcome": "",
+        "tags": tags,
+        "agent_context": agent_context
+        or f"{et.replace('-', ' ')} engagement on {date or today}"
+        + (f" with {customer}" if customer else ""),
+    }
+
+    if et == "build-with-me":
+        frontmatter.update(
+            {
+                "trial_start": trial_start or date or today,
+                "trial_end": trial_end,
+                "champion": _as_link(champion),
+                "sponsor": _as_link(sponsor),
+                "target_use_cases": list(target_use_cases or []),
+                "next_touch": next_touch,
+                "next_touch_type": next_touch_type,
+                "adoption_health": adoption_health or "on-track",
+                "adoption_outcome": "",
+            }
+        )
+    if et in ("technical-deep-dive", "ve-assist"):
+        frontmatter["owning_ve"] = _as_link(owning_ve or requested_by)
+        frontmatter["requested_by"] = _as_link(requested_by or owning_ve)
+        frontmatter["sales_stage"] = sales_stage
+        frontmatter["technical_domains"] = list(technical_domains or [])
+
+    body_parts = [
+        f"# {title}",
+        "",
+        f"**Date:** {date or today}",
+        f"**Engagement type:** {et}",
+        f"**Stage:** {st}",
+        f"**Customer:** {frontmatter.get('customer') or '-'}",
+        f"**Partner:** {frontmatter.get('partner') or '-'}",
+        f"**Make stakeholders:** {', '.join(frontmatter.get('stakeholders') or []) or '-'}",
+        f"**AM(s):** {', '.join(frontmatter.get('ams') or []) or '-'}",
+    ]
+    if et == "build-with-me":
+        body_parts.extend(
+            [
+                f"**Trial window:** {frontmatter.get('trial_start')} → {frontmatter.get('trial_end') or 'TBD'}",
+                f"**Champion:** {frontmatter.get('champion') or '-'}",
+                f"**Sponsor:** {frontmatter.get('sponsor') or '-'}",
+                f"**Next touch:** {frontmatter.get('next_touch') or 'TBD'} ({frontmatter.get('next_touch_type') or '-'})",
+                f"**Adoption health:** {frontmatter.get('adoption_health')}",
+            ]
+        )
+    if et in ("technical-deep-dive", "ve-assist"):
+        body_parts.extend(
+            [
+                f"**Owning VE / requested by:** {frontmatter.get('owning_ve') or frontmatter.get('requested_by') or '-'}",
+                f"**Sales stage:** {frontmatter.get('sales_stage') or '-'}",
+                f"**Technical domains:** {', '.join(frontmatter.get('technical_domains') or []) or '-'}",
+            ]
+        )
+
+    body_parts.extend(
+        [
+            "",
+            "---",
+            "",
+            "## Objective",
+            "",
+            objective or "One sentence: what does success look like for this engagement?",
+            "",
+            "## Prep",
+            "",
+            "- [ ] Read customer / partner entity card",
+            "- [ ] Review past engagements / events with this account",
+            "- [ ] Draft 2–3 opening questions",
+            "",
+            "## Agenda",
+            "",
+            "1.",
+            "2.",
+            "3.",
+            "",
+            "## Interactions",
+            "",
+            "-",
+            "",
+            "## Next Actions",
+            "",
+            "- [ ] [due:: ] [priority:: ]",
+            "",
+            "---",
+            "",
+            "## High-signal debrief",
+            "",
+            "> Fill within 24h of the session.",
+            "",
+            "| Field | Capture |",
+            "|-------|---------|",
+            "| Customer job | |",
+            "| Trigger | |",
+            "| Persona | |",
+            "| Current workaround | |",
+            "| Friction / objection | |",
+            "| Decision criterion | |",
+            "| Technical constraint | |",
+            "| Product gap | |",
+            "| Market signal | |",
+            "| Evidence / source | |",
+            "| Confidence | low / medium / high |",
+            "| Reuse / promotion destination | pattern-library / product-feedback / none |",
+            "",
+        ]
+    )
+    if et == "build-with-me":
+        body_parts.extend(
+            [
+                "## Planned touchpoints",
+                "",
+                "| When | Touchpoint type | Channel | Status | Event link |",
+                "|------|-----------------|---------|--------|------------|",
+                f"| {frontmatter.get('trial_start') or date or today} | kickoff-workshop | workshop | planned | |",
+                "| | email-follow-up | email | planned | |",
+                "| | mid-trial-review | call | planned | |",
+                f"| {frontmatter.get('trial_end') or ''} | final-review | call | planned | |",
+                "",
+                "## Adoption scorecard",
+                "",
+                "| Criterion | Target | Status | Evidence |",
+                "|-----------|--------|--------|----------|",
+                "| 1. | | ⬜ Not started | |",
+                "| 2. | | ⬜ Not started | |",
+                "| 3. | | ⬜ Not started | |",
+                "",
+            ]
+        )
+    return frontmatter, "\n".join(body_parts)
 
 
 async def read_vault_template(client: Any, candidate_paths: list[str]) -> Tuple[str, str]:

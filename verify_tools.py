@@ -49,6 +49,7 @@ def verify_tool_registration():
         "build_context",
         "capture",
         "create_event",
+        "create_engagement",
     ]
 
     registered_names = [tool.name for tool in registered_tools]

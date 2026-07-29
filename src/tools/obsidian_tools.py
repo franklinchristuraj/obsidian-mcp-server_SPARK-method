@@ -25,8 +25,16 @@ from src.vault_intelligence.corpus import ConcurrentModificationError, VaultCorp
 from src.vault_intelligence.entity_index import EntityIndex
 from src.vault_intelligence.tools import VaultIntelligenceTools
 from src.vault_intelligence.parser import (
+    ADOPTION_HEALTH,
+    ADOPTION_STAGES,
+    CHANNELS,
+    ENGAGEMENT_STATUSES,
+    ENGAGEMENT_TYPES,
     EVENT_TYPES,
+    INTERACTIONS_HEADING,
     ParsedNote,
+    SIGNAL_CONFIDENCE,
+    TOUCHPOINT_TYPES,
     extract_all_wikilink_targets,
     normalize_link_target,
     normalize_path_key,
@@ -89,6 +97,12 @@ def _entity_write_warnings(
             warnings.append(
                 f"event_type '{event_type}' is not in the controlled vocabulary "
                 f"{sorted(EVENT_TYPES)}"
+            )
+        touchpoint_type = str(fm.get("touchpoint_type", "")).strip().lower()
+        if touchpoint_type and touchpoint_type not in TOUCHPOINT_TYPES:
+            warnings.append(
+                f"touchpoint_type '{touchpoint_type}' is not in the controlled "
+                f"vocabulary {sorted(TOUCHPOINT_TYPES)}"
             )
     if entity_index is not None:
         unresolved = sorted(
@@ -210,6 +224,87 @@ def _upsert_events_section(
     return head + new_body, True
 
 
+def _upsert_interactions_section(
+    content: str,
+    event_stem: str,
+    event_type: str,
+    event_date: str,
+    touchpoint_type: str = "",
+) -> Tuple[str, bool]:
+    """Idempotently add a child-event line to an engagement note's ## Interactions."""
+    label = touchpoint_type or event_type
+    new_line = f"- [[{event_stem}]] — {label}, {event_date}"
+
+    head = ""
+    body = content
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            cut = end + 4
+            head = content[:cut]
+            body = content[cut:]
+
+    def _date_key(line: str) -> str:
+        m = _EVENT_LINE_DATE_RE.search(line)
+        return m.group(1) if m else ""
+
+    section_re = re.compile(rf"(?m)^##\s+{re.escape(INTERACTIONS_HEADING)}\s*$")
+    m = section_re.search(body)
+    if m:
+        start = m.end()
+        nxt = re.search(r"(?m)^##\s+", body[start:])
+        sec_end = start + nxt.start() if nxt else len(body)
+        section = body[start:sec_end]
+        lines = [
+            ln.rstrip()
+            for ln in section.splitlines()
+            if ln.strip().startswith("- ") and "[[" in ln
+        ]
+        if any(event_stem in ln for ln in lines):
+            return content, False
+        lines.append(new_line)
+        lines.sort(key=_date_key, reverse=True)
+        new_section = "\n" + "\n".join(lines) + "\n"
+        new_body = body[:start] + new_section + body[sec_end:]
+    else:
+        block = f"## {INTERACTIONS_HEADING}\n{new_line}\n"
+        anchor = re.search(r"(?m)^##\s+Next Actions\s*$", body) or re.search(
+            r"(?m)^##\s+High-signal debrief\s*$", body
+        ) or re.search(r"(?m)^##\s+Debrief\s*$", body)
+        if anchor:
+            pos = anchor.start()
+            new_body = body[:pos] + block + "\n" + body[pos:]
+        else:
+            sep = "" if body.endswith("\n") else "\n"
+            new_body = body + sep + "\n" + block
+
+    return head + new_body, True
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
+
+
+def _as_wikilink(value: str) -> str:
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.startswith("[["):
+        return v
+    return f"[[{v}]]"
+
+
+def _validate_optional_vocab(field: str, value: str, allowed: frozenset) -> str:
+    v = (value or "").strip().lower()
+    if not v:
+        return ""
+    if v not in allowed:
+        raise ValueError(
+            f"{field} '{value}' is not in the controlled vocabulary {sorted(allowed)}"
+        )
+    return v
+
+
 # MCP 2025-06-18 tool annotations (hints only, not enforced security boundaries).
 # Every entry: readOnlyHint (no vault mutation), destructiveHint (may overwrite/
 # remove existing data), idempotentHint (repeat call with same args -> same
@@ -291,6 +386,13 @@ _TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     },
     "create_event": {
         "title": "Create Event",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "create_engagement": {
+        "title": "Create Engagement",
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -638,11 +740,30 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "organizations": {"type": "array", "items": {"type": "string"}},
             "participants": {"type": "array", "items": {"type": "string"}},
             "concepts": {"type": "array", "items": {"type": "string"}},
+            "parent_engagement": {"type": "string"},
+            "touchpoint_type": {"type": "string"},
+            "channel": {"type": "string"},
+            "adoption_stage": {"type": "string"},
             "backrefs_updated": {"type": "boolean"},
             "backref_results": {"type": "array", "items": {"type": "object"}},
             "created_at": {"type": "string"},
         },
         "required": ["path", "scope", "event_type", "event_date"],
+    },
+    "create_engagement": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "path": {"type": "string"},
+            "scope": {"type": "string"},
+            "engagement_type": {"type": "string"},
+            "date": {"type": "string"},
+            "customer": {"type": "string"},
+            "stage": {"type": "string"},
+            "status": {"type": "string"},
+            "created_at": {"type": "string"},
+        },
+        "required": ["path", "scope", "engagement_type", "date"],
     },
 }
 
@@ -695,6 +816,7 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "build_context": "build_context",
     "capture": "capture_seed",
     "create_event": "create_event",
+    "create_engagement": "create_engagement",
 }
 
 OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
@@ -1403,6 +1525,45 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "description": "Optional POC stage for pipeline timelines.",
                         "default": "",
                     },
+                    "parent_engagement": {
+                        "type": "string",
+                        "description": (
+                            "Parent engagement note stem or path under 12_engagements/ "
+                            "(e.g. 2026-07-23_4flow-build-with-me). Links this event as a "
+                            "child touchpoint and updates the parent's ## Interactions."
+                        ),
+                        "default": "",
+                    },
+                    "touchpoint_type": {
+                        "type": "string",
+                        "enum": sorted(TOUCHPOINT_TYPES),
+                        "description": "BWM / adoption touchpoint kind.",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "enum": sorted(CHANNELS),
+                        "description": "Interaction channel.",
+                    },
+                    "adoption_stage": {
+                        "type": "string",
+                        "enum": sorted(ADOPTION_STAGES),
+                        "description": "Where this touch sits in the trial/adoption arc.",
+                    },
+                    "requested_by": {
+                        "type": "string",
+                        "description": "VE/stakeholder who requested this specialist touch.",
+                        "default": "",
+                    },
+                    "technical_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Kebab-case technical domains (mcp, sap-onprem, …).",
+                    },
+                    "signal_confidence": {
+                        "type": "string",
+                        "enum": sorted(SIGNAL_CONFIDENCE),
+                        "description": "Confidence in captured market/product signal.",
+                    },
                     "scope": sw,
                     "update_backrefs": {
                         "type": "boolean",
@@ -1411,6 +1572,148 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     },
                 },
                 ["event_type"],
+            ),
+            _tool(
+                "create_engagement",
+                (
+                    "Create a VE engagement note in work/12_engagements/. Routes by "
+                    "engagement_type to the correct vault template "
+                    "(build-with-me-engagement, technical-deep-dive, ve-assist, or "
+                    "generic ve-engagement). Use for parent Build-with-Me adoption "
+                    "programs and technical deep-dive specialist pull-ins. Child "
+                    "interactions should then be logged with create_event + "
+                    "parent_engagement. scope=work."
+                ),
+                {
+                    "engagement_type": {
+                        "type": "string",
+                        "enum": sorted(ENGAGEMENT_TYPES),
+                        "description": "Controlled engagement subtype.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD kickoff/session date. Defaults to today.",
+                        "default": "",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Engagement title (H1). Derived if omitted.",
+                        "default": "",
+                    },
+                    "customer": {
+                        "type": "string",
+                        "description": "Customer name/slug (required unless partner is set).",
+                        "default": "",
+                    },
+                    "partner": {
+                        "type": "string",
+                        "description": "Partner name/slug when applicable.",
+                        "default": "",
+                    },
+                    "stage": {
+                        "type": "string",
+                        "description": "Deal/lifecycle stage tag value.",
+                        "default": "",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": sorted(ENGAGEMENT_STATUSES),
+                        "description": "Engagement lifecycle status (default prepping).",
+                        "default": "prepping",
+                    },
+                    "stakeholders": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Internal Make stakeholder names/slugs.",
+                    },
+                    "ams": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Account Manager names/slugs.",
+                    },
+                    "agent_context": {
+                        "type": "string",
+                        "description": "One-line summary. Derived if omitted.",
+                        "default": "",
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "Success criterion for this engagement.",
+                        "default": "",
+                    },
+                    "trial_start": {
+                        "type": "string",
+                        "description": "BWM enterprise trial start (YYYY-MM-DD).",
+                        "default": "",
+                    },
+                    "trial_end": {
+                        "type": "string",
+                        "description": "BWM enterprise trial end (YYYY-MM-DD).",
+                        "default": "",
+                    },
+                    "champion": {
+                        "type": "string",
+                        "description": "Customer champion name/slug (BWM).",
+                        "default": "",
+                    },
+                    "sponsor": {
+                        "type": "string",
+                        "description": "Customer exec sponsor name/slug (BWM).",
+                        "default": "",
+                    },
+                    "target_use_cases": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Target use cases for the trial (BWM).",
+                    },
+                    "next_touch": {
+                        "type": "string",
+                        "description": "Next planned touch date YYYY-MM-DD (BWM).",
+                        "default": "",
+                    },
+                    "next_touch_type": {
+                        "type": "string",
+                        "enum": sorted(TOUCHPOINT_TYPES),
+                        "description": "Next planned touchpoint type (BWM).",
+                    },
+                    "adoption_health": {
+                        "type": "string",
+                        "enum": sorted(ADOPTION_HEALTH),
+                        "description": "Adoption health (BWM; default on-track).",
+                    },
+                    "owning_ve": {
+                        "type": "string",
+                        "description": "Owning VE for technical-deep-dive / ve-assist.",
+                        "default": "",
+                    },
+                    "requested_by": {
+                        "type": "string",
+                        "description": "Who pulled Franklin in (technical-deep-dive).",
+                        "default": "",
+                    },
+                    "sales_stage": {
+                        "type": "string",
+                        "description": "Sales/deal stage for technical-deep-dive.",
+                        "default": "",
+                    },
+                    "technical_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Technical domains for deep-dive.",
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "Optional filename slug override (kebab-case).",
+                        "default": "",
+                    },
+                    "scope": sw,
+                    "update_index": {
+                        "type": "boolean",
+                        "description": "Append hub wiring hints to index/log (default true).",
+                        "default": True,
+                    },
+                },
+                ["engagement_type"],
             ),
         ]
         return tools
@@ -2862,6 +3165,13 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         outcome: str = "",
         source_note: str = "",
         poc_stage: str = "",
+        parent_engagement: str = "",
+        touchpoint_type: str = "",
+        channel: str = "",
+        adoption_stage: str = "",
+        requested_by: str = "",
+        technical_domains: Optional[List[str]] = None,
+        signal_confidence: str = "",
         scope: Optional[str] = None,
         update_backrefs: bool = True,
     ) -> Dict[str, Any]:
@@ -2878,25 +3188,58 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 f"{sorted(EVENT_TYPES)}"
             )
 
+        touchpoint_type = _validate_optional_vocab(
+            "touchpoint_type", touchpoint_type, TOUCHPOINT_TYPES
+        )
+        channel = _validate_optional_vocab("channel", channel, CHANNELS)
+        adoption_stage = _validate_optional_vocab(
+            "adoption_stage", adoption_stage, ADOPTION_STAGES
+        )
+        signal_confidence = _validate_optional_vocab(
+            "signal_confidence", signal_confidence, SIGNAL_CONFIDENCE
+        )
+
         event_date = (event_date or "").strip() or datetime.now().strftime("%Y-%m-%d")
         try:
             datetime.strptime(event_date, "%Y-%m-%d")
         except ValueError as e:
             raise ValueError("event_date must be YYYY-MM-DD") from e
 
-        def slugify(value: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
-
         customer = (customer or "").strip()
-        cust_slug = slugify(customer) if customer else ""
-        org_slugs = [slugify(o) for o in (organizations or []) if str(o).strip()]
-        part_slugs = [slugify(p) for p in (participants or []) if str(p).strip()]
-        concept_slugs = [slugify(c) for c in (concepts or []) if str(c).strip()]
+        cust_slug = _slugify(customer) if customer else ""
+        org_slugs = [_slugify(o) for o in (organizations or []) if str(o).strip()]
+        part_slugs = [_slugify(p) for p in (participants or []) if str(p).strip()]
+        concept_slugs = [_slugify(c) for c in (concepts or []) if str(c).strip()]
+        domain_slugs = [
+            _slugify(d) for d in (technical_domains or []) if str(d).strip()
+        ]
+        requested_by_slug = _slugify(requested_by) if requested_by.strip() else ""
         # Every event involves the home org; default organizations to make.
         if not org_slugs:
             org_slugs = ["make"]
 
+        parent_raw = (parent_engagement or "").strip()
+        if parent_raw.startswith("[[") and parent_raw.endswith("]]"):
+            parent_raw = parent_raw[2:-1].split("|", 1)[0].strip()
+        parent_raw = parent_raw.replace("\\", "/").removesuffix(".md")
+        if parent_raw.startswith("work/"):
+            parent_raw = parent_raw[len("work/") :]
+        if ".." in parent_raw.split("/"):
+            raise ValueError("parent_engagement must not contain path traversal")
+        parent_stem = Path(parent_raw).name if parent_raw else ""
+        parent_rel = ""
+        if parent_raw:
+            if parent_raw.startswith("12_engagements/"):
+                parent_rel = f"{parent_raw}.md" if not parent_raw.endswith(".md") else parent_raw
+            else:
+                parent_rel = f"12_engagements/{parent_stem}.md"
+            # Prefer source_note = parent engagement when not explicitly set.
+            if not source_note.strip():
+                source_note = parent_stem or parent_raw
+
         fn_slug = cust_slug or org_slugs[0]
+        # Prefer touchpoint in filename when present for BWM child clarity.
+        type_for_name = touchpoint_type or event_type
 
         ctx = get_effective_workspace_context()
         allow = tuple(ctx.allowed_scopes)
@@ -2905,7 +3248,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
 
-        base = f"entities/event/{event_date}-{fn_slug}-{event_type}"
+        base = f"entities/event/{event_date}-{fn_slug}-{type_for_name}"
         rel = f"{base}.md"
         n = 1
         while True:
@@ -2919,10 +3262,10 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         display_subject = customer or org_slugs[0]
         title = title.strip() or (
             f"{display_subject.replace('-', ' ').title()} "
-            f"{event_type.replace('-', ' ').title()}"
+            f"{type_for_name.replace('-', ' ').title()}"
         )
         agent_context = agent_context.strip() or (
-            f"{event_type.replace('-', ' ')} on {event_date}"
+            f"{type_for_name.replace('-', ' ')} on {event_date}"
             + (f" with {customer}" if customer else "")
         )
         ac_safe = agent_context.replace('"', "'")
@@ -2942,11 +3285,26 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         fm_lines.extend(f'  - "[[{p}]]"' for p in part_slugs)
         fm_lines.append("concepts:")
         fm_lines.extend(f'  - "[[{c}]]"' for c in concept_slugs)
+        if parent_stem:
+            fm_lines.append(f'parent_engagement: "[[{parent_stem}]]"')
         if source_note.strip():
             sn = source_note.strip()
             if not sn.startswith("[["):
                 sn = f"[[{sn}]]"
             fm_lines.append(f'source_note: "{sn}"')
+        if touchpoint_type:
+            fm_lines.append(f"touchpoint_type: {touchpoint_type}")
+        if channel:
+            fm_lines.append(f"channel: {channel}")
+        if adoption_stage:
+            fm_lines.append(f"adoption_stage: {adoption_stage}")
+        if requested_by_slug:
+            fm_lines.append(f'requested_by: "[[{requested_by_slug}]]"')
+        if domain_slugs:
+            fm_lines.append("technical_domains:")
+            fm_lines.extend(f"  - {d}" for d in domain_slugs)
+        if signal_confidence:
+            fm_lines.append(f"signal_confidence: {signal_confidence}")
         if poc_stage.strip():
             fm_lines.append(f"poc_stage: {poc_stage.strip()}")
         fm_lines.append(f"last_updated: {datetime.now().strftime('%Y-%m-%d')}")
@@ -2957,11 +3315,20 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         body_lines = [f"# {title}", "", f"> agent_context: {agent_context}", "", "## Connections"]
         if cust_slug:
             body_lines.append(f"- [[{cust_slug}]] - customer")
+        if parent_stem:
+            body_lines.append(f"- [[{parent_stem}]] - parent engagement")
         body_lines.extend(f"- [[{p}]] - participant" for p in part_slugs)
         body_lines.extend(f"- [[{c}]] - concept" for c in concept_slugs)
-        if not (cust_slug or part_slugs or concept_slugs):
+        if not (cust_slug or part_slugs or concept_slugs or parent_stem):
             body_lines.append("- [[entity]] - related")
         body_lines += ["", "## Outcome", f"- {outcome.strip() or 'TBD'}", ""]
+        if signal_confidence or domain_slugs:
+            body_lines += [
+                "## Signals",
+                f"- Confidence: {signal_confidence or 'TBD'}",
+            ]
+            body_lines.extend(f"- Domain: {d}" for d in domain_slugs)
+            body_lines.append("")
 
         content = "\n".join(fm_lines) + "\n\n" + "\n".join(body_lines)
 
@@ -3014,6 +3381,38 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     backref_results.append(
                         {"entity": note.path, "status": f"error: {e}"}
                     )
+
+            if parent_rel:
+                parent_full = resolve_scoped_path(parent_rel, write_scope, allow)
+                try:
+                    if await self.client.note_exists(parent_full):
+                        existing = await self.client.read_note(parent_full)
+                        updated, changed = _upsert_interactions_section(
+                            existing,
+                            event_stem,
+                            event_type,
+                            event_date,
+                            touchpoint_type=touchpoint_type,
+                        )
+                        if changed:
+                            await self.client.update_note(parent_full, updated)
+                            changed_any = True
+                            backref_results.append(
+                                {"entity": parent_rel, "status": "updated"}
+                            )
+                        else:
+                            backref_results.append(
+                                {"entity": parent_rel, "status": "already-linked"}
+                            )
+                    else:
+                        backref_results.append(
+                            {"entity": parent_rel, "status": "unresolved"}
+                        )
+                except Exception as e:
+                    backref_results.append(
+                        {"entity": parent_rel, "status": f"error: {e}"}
+                    )
+
             if changed_any:
                 vi.corpus.clear_cache()
 
@@ -3043,8 +3442,255 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "organizations": org_slugs,
                 "participants": part_slugs,
                 "concepts": concept_slugs,
+                "parent_engagement": parent_stem,
+                "touchpoint_type": touchpoint_type,
+                "channel": channel,
+                "adoption_stage": adoption_stage,
                 "backrefs_updated": update_backrefs,
                 "backref_results": backref_results,
+                "created_at": datetime.now().isoformat(),
+            },
+        }
+
+    @_write_locked
+    async def create_engagement(
+        self,
+        engagement_type: str,
+        date: str = "",
+        title: str = "",
+        customer: str = "",
+        partner: str = "",
+        stage: str = "",
+        status: str = "prepping",
+        stakeholders: Optional[List[str]] = None,
+        ams: Optional[List[str]] = None,
+        agent_context: str = "",
+        objective: str = "",
+        trial_start: str = "",
+        trial_end: str = "",
+        champion: str = "",
+        sponsor: str = "",
+        target_use_cases: Optional[List[str]] = None,
+        next_touch: str = "",
+        next_touch_type: str = "",
+        adoption_health: str = "",
+        owning_ve: str = "",
+        requested_by: str = "",
+        sales_stage: str = "",
+        technical_domains: Optional[List[str]] = None,
+        slug: str = "",
+        scope: Optional[str] = None,
+        update_index: bool = True,
+    ) -> Dict[str, Any]:
+        """Create a schema-valid engagement note under 12_engagements/."""
+        if not self.client:
+            raise ValueError("Obsidian client not initialized. Check OBSIDIAN_VAULT_PATH.")
+
+        from ..utils.template_utils import (
+            build_engagement_note_from_data,
+            read_vault_template,
+            template_detector,
+        )
+
+        engagement_type = (engagement_type or "").strip().lower()
+        if engagement_type not in ENGAGEMENT_TYPES:
+            raise ValueError(
+                f"engagement_type '{engagement_type}' is not in the controlled "
+                f"vocabulary {sorted(ENGAGEMENT_TYPES)}"
+            )
+
+        status = _validate_optional_vocab("status", status or "prepping", ENGAGEMENT_STATUSES) or "prepping"
+        next_touch_type = _validate_optional_vocab(
+            "next_touch_type", next_touch_type, TOUCHPOINT_TYPES
+        )
+        adoption_health = _validate_optional_vocab(
+            "adoption_health", adoption_health, ADOPTION_HEALTH
+        )
+        if engagement_type == "build-with-me" and not adoption_health:
+            adoption_health = "on-track"
+
+        date = (date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError("date must be YYYY-MM-DD") from e
+        for field_name, field_val in (
+            ("trial_start", trial_start),
+            ("trial_end", trial_end),
+            ("next_touch", next_touch),
+        ):
+            v = (field_val or "").strip()
+            if not v:
+                continue
+            try:
+                datetime.strptime(v, "%Y-%m-%d")
+            except ValueError as e:
+                raise ValueError(f"{field_name} must be YYYY-MM-DD") from e
+
+        customer = (customer or "").strip()
+        partner = (partner or "").strip()
+        if not customer and not partner:
+            raise ValueError("Provide at least one of customer or partner")
+
+        if engagement_type in ("technical-deep-dive", "ve-assist") and not (
+            owning_ve.strip() or requested_by.strip()
+        ):
+            raise ValueError(
+                f"{engagement_type} requires owning_ve or requested_by"
+            )
+
+        stage = (stage or "").strip().lower()
+        if not stage:
+            stage = "build-with-me" if engagement_type == "build-with-me" else "discovery"
+
+        subject = customer or partner
+        subject_slug = _slugify(subject)
+        raw_slug = (slug or "").strip()
+        if raw_slug and (
+            ".." in raw_slug
+            or "/" in raw_slug
+            or "\\" in raw_slug
+            or raw_slug.startswith(".")
+        ):
+            raise ValueError("slug must be a single kebab-case segment")
+        desc = _slugify(raw_slug) if raw_slug else f"{subject_slug}-{engagement_type}"
+        if not desc or ".." in desc or "/" in desc:
+            raise ValueError("slug must be a single kebab-case segment")
+
+        rel = f"12_engagements/{date}_{desc}.md"
+        ctx = get_effective_workspace_context()
+        allow = tuple(ctx.allowed_scopes)
+        try:
+            write_scope = resolve_write_scope(scope, allow)
+        except (ValueError, PermissionError) as e:
+            raise self._access_error(e) from e
+
+        full = resolve_scoped_path(rel, write_scope, allow)
+        if await self.client.note_exists(full):
+            raise ValueError(f"Engagement already exists: {rel}")
+
+        title = title.strip() or (
+            f"{subject.replace('-', ' ').title()} "
+            f"{engagement_type.replace('-', ' ').title()}"
+        )
+
+        frontmatter, body = build_engagement_note_from_data(
+            title=title,
+            engagement_type=engagement_type,
+            date=date,
+            stage=stage,
+            customer=customer,
+            partner=partner,
+            stakeholders=stakeholders,
+            ams=ams,
+            agent_context=agent_context,
+            objective=objective,
+            trial_start=trial_start,
+            trial_end=trial_end,
+            champion=champion,
+            sponsor=sponsor,
+            target_use_cases=target_use_cases,
+            next_touch=next_touch,
+            next_touch_type=next_touch_type,
+            adoption_health=adoption_health,
+            owning_ve=owning_ve,
+            requested_by=requested_by,
+            sales_stage=sales_stage,
+            technical_domains=technical_domains,
+        )
+        frontmatter["status"] = status
+
+        # Prefer vault template when available; overlay structured frontmatter.
+        content = ""
+        template_used = ""
+        try:
+            candidates = template_detector.get_template_candidate_paths(
+                rel, write_scope, engagement_type=engagement_type
+            )
+            tmpl, template_used = await read_vault_template(self.client, candidates)
+            filled = template_detector.apply_template(
+                tmpl, date=date, title=title
+            )
+            fm, tmpl_body = template_detector.extract_frontmatter(filled)
+            merged = {**(fm or {}), **frontmatter}
+            # Keep body structure from vault template; inject objective if blank.
+            if objective and "## Objective" in tmpl_body:
+                tmpl_body = re.sub(
+                    r"(## Objective\n\n)(.*?)(\n## |\Z)",
+                    rf"\g<1>{objective}\n\n\3",
+                    tmpl_body,
+                    count=1,
+                    flags=re.DOTALL,
+                )
+            content = template_detector.build_content_with_frontmatter(merged, tmpl_body)
+        except Exception:
+            content = template_detector.build_content_with_frontmatter(
+                frontmatter, body
+            )
+            template_used = "built-in-fallback"
+
+        await self.create_note(
+            path=rel,
+            content=content,
+            scope=write_scope,
+            create_folders=True,
+            use_template=False,
+        )
+
+        hub_notes: List[str] = []
+        if update_index:
+            today = datetime.now().strftime("%Y-%m-%d")
+            index_line = (
+                f"- [[{Path(rel).stem}]] — {title} "
+                f"({engagement_type}, {status})"
+            )
+            log_line = (
+                f"## [{today}] ENGAGEMENT-CREATED | {title} | updated: {rel}"
+            )
+            for hub_path, line, label in (
+                ("index.md", index_line, "index"),
+                ("log.md", log_line, "log"),
+            ):
+                hub_full = resolve_scoped_path(hub_path, write_scope, allow)
+                try:
+                    if await self.client.note_exists(hub_full):
+                        existing = await self.client.read_note(hub_full)
+                        if Path(rel).stem not in existing:
+                            sep = "" if existing.endswith("\n") else "\n"
+                            await self.client.update_note(
+                                hub_full, existing + sep + line + "\n"
+                            )
+                            hub_notes.append(f"{label}:updated")
+                        else:
+                            hub_notes.append(f"{label}:already-linked")
+                    else:
+                        hub_notes.append(f"{label}:missing")
+                except Exception as e:
+                    hub_notes.append(f"{label}:error:{e}")
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"✅ Created engagement: {rel} (scope={write_scope})\n"
+                        f"engagement_type={engagement_type}, date={date}, "
+                        f"status={status}\n"
+                        f"template={template_used or 'n/a'}"
+                    ),
+                }
+            ],
+            "metadata": {
+                "path": rel,
+                "scope": write_scope,
+                "engagement_type": engagement_type,
+                "date": date,
+                "status": status,
+                "stage": stage,
+                "customer": _slugify(customer) if customer else "",
+                "partner": _slugify(partner) if partner else "",
+                "template_used": template_used,
+                "hub_wiring": hub_notes,
                 "created_at": datetime.now().isoformat(),
             },
         }

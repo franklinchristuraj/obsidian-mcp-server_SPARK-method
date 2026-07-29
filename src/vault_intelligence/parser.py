@@ -37,13 +37,60 @@ EVENT_TYPES = frozenset(
         "all-hands",
         "demo",
         "partner-review",
+        "technical-deep-dive",
         "other",
     }
 )
+# Controlled vocabulary for type:engagement notes in 12_engagements/.
+ENGAGEMENT_TYPES = frozenset(
+    {
+        "build-with-me",
+        "hackathon",
+        "workshop",
+        "consulting",
+        "partner-review",
+        "demo",
+        "ve-assist",
+        "technical-deep-dive",
+    }
+)
+ENGAGEMENT_STATUSES = frozenset(
+    {"prepping", "scheduled", "live", "debriefed", "closed"}
+)
+TOUCHPOINT_TYPES = frozenset(
+    {
+        "kickoff-workshop",
+        "email-follow-up",
+        "mid-trial-review",
+        "support",
+        "technical-question",
+        "final-review",
+        "ad-hoc",
+    }
+)
+ADOPTION_STAGES = frozenset(
+    {
+        "trial-start",
+        "building",
+        "mid-trial",
+        "pre-close",
+        "converted",
+        "churned",
+        "extended",
+    }
+)
+ADOPTION_HEALTH = frozenset(
+    {"on-track", "at-risk", "stalled", "converted", "churned"}
+)
+CHANNELS = frozenset(
+    {"workshop", "call", "email", "slack", "async", "office-hours"}
+)
+SIGNAL_CONFIDENCE = frozenset({"low", "medium", "high"})
 CONNECTIONS_HEADING = "Connections"
 SOURCE_HISTORY_HEADING = "Source History"
 OPEN_QUESTIONS_HEADING = "Open Questions"
 EVENTS_HEADING = "Events"
+INTERACTIONS_HEADING = "Interactions"
 
 
 def required_fm_for(entity_type: str) -> frozenset:
@@ -102,7 +149,7 @@ def normalize_path_key(path: str) -> str:
 
 
 FM_FIELD_RE = re.compile(
-    r"^(?P<key>agent_context|created|last_updated|entity_type|event_type|event_date|type|source_count|poc_stage|lifecycle_stage|poc_hypothesis):\s*(?P<val>.+?)\s*$",
+    r"^(?P<key>agent_context|created|last_updated|entity_type|event_type|event_date|type|source_count|poc_stage|lifecycle_stage|poc_hypothesis|engagement_type|stage|status|trial_start|trial_end|next_touch|next_touch_type|adoption_health|adoption_outcome|adoption_stage|touchpoint_type|channel|parent_engagement|source_note|requested_by|owning_ve|sales_stage|signal_confidence|date):\s*(?P<val>.+?)\s*$",
     re.MULTILINE,
 )
 

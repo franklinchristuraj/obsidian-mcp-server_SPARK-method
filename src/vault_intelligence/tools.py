@@ -19,6 +19,7 @@ from .parser import (
     EVENT_TYPES,
     EVENTS_HEADING,
     OPEN_QUESTIONS_HEADING,
+    TOUCHPOINT_TYPES,
     extract_section_links,
     extract_source_history_entries,
     link_matches_target,
@@ -37,6 +38,22 @@ KEY_FRONTMATTER_FIELDS = (
     "poc_stage",
     "lifecycle_stage",
     "poc_hypothesis",
+    "parent_engagement",
+    "touchpoint_type",
+    "channel",
+    "adoption_stage",
+    "requested_by",
+    "technical_domains",
+    "signal_confidence",
+    "engagement_type",
+    "stage",
+    "status",
+    "trial_start",
+    "trial_end",
+    "next_touch",
+    "next_touch_type",
+    "adoption_health",
+    "adoption_outcome",
     "last_updated",
     "source_count",
 )
@@ -236,9 +253,26 @@ class VaultIntelligenceTools:
             "agent_context_of_target": target.agent_context if target else "",
         }
         if target is not None:
-            event_date = target.frontmatter.get("event_date")
+            fm = target.frontmatter
+            event_date = fm.get("event_date")
             if event_date:
                 entry["event_date"] = str(event_date)
+            for key in (
+                "event_type",
+                "touchpoint_type",
+                "parent_engagement",
+                "adoption_stage",
+                "channel",
+                "signal_confidence",
+            ):
+                val = fm.get(key)
+                if val:
+                    entry[key] = val if not isinstance(val, list) else list(val)
+            domains = fm.get("technical_domains")
+            if domains:
+                entry["technical_domains"] = (
+                    list(domains) if isinstance(domains, list) else [domains]
+                )
         return entry
 
     def _compute_backlinks(
@@ -333,6 +367,53 @@ class VaultIntelligenceTools:
 
         key_fm = {k: match.frontmatter[k] for k in KEY_FRONTMATTER_FIELDS if k in match.frontmatter}
 
+        # Surface linked 12_engagements/ notes for customer/partner entities.
+        engagements_raw: List[dict] = []
+        if match.entity_type in ("customer", "partner", "company"):
+            all_notes = await self._all_notes(scope, folder="12_engagements")
+            target_key = normalize_path_key(match.path)
+            stem = Path(match.path).stem.lower()
+            for note in all_notes:
+                if str(note.frontmatter.get("type", "")).strip().lower() != "engagement":
+                    continue
+                cust = note.frontmatter.get("customer") or ""
+                partner = note.frontmatter.get("partner") or ""
+                linked = False
+                for ref in as_link_list(cust) + as_link_list(partner):
+                    resolved = self._resolve_link(ref, scope, notes_by_key, name_index)
+                    if resolved and normalize_path_key(resolved) == target_key:
+                        linked = True
+                        break
+                    if normalize_path_key(ref) in (target_key, stem):
+                        linked = True
+                        break
+                if not linked:
+                    continue
+                engagements_raw.append(
+                    {
+                        "path": note.path,
+                        "display": Path(note.path).stem,
+                        "engagement_type": note.frontmatter.get("engagement_type", ""),
+                        "status": note.frontmatter.get("status", ""),
+                        "stage": note.frontmatter.get("stage", ""),
+                        "trial_start": note.frontmatter.get("trial_start", ""),
+                        "trial_end": note.frontmatter.get("trial_end", ""),
+                        "next_touch": note.frontmatter.get("next_touch", ""),
+                        "next_touch_type": note.frontmatter.get("next_touch_type", ""),
+                        "adoption_health": note.frontmatter.get("adoption_health", ""),
+                        "adoption_outcome": note.frontmatter.get("adoption_outcome", ""),
+                        "agent_context": note.agent_context,
+                    }
+                )
+            engagements_raw.sort(
+                key=lambda e: e.get("next_touch")
+                or e.get("trial_end")
+                or e.get("trial_start")
+                or "",
+                reverse=True,
+            )
+        engagements, eng_trunc, eng_total = _truncate(engagements_raw, CAP_EVENTS)
+
         payload = {
             "canonical_path": match.path,
             "scope": match.scope,
@@ -349,6 +430,9 @@ class VaultIntelligenceTools:
             "events": events,
             "events_truncated": events_trunc,
             "events_total": events_total,
+            "engagements": engagements,
+            "engagements_truncated": eng_trunc,
+            "engagements_total": eng_total,
             "recent_mentions": recent,
         }
         return _json_result(payload)
@@ -481,6 +565,9 @@ class VaultIntelligenceTools:
             "connections": entity_data["connections"][: CAP_CONNECTIONS if depth >= 1 else 0],
             "backlinks": entity_data["backlinks"][: CAP_BACKLINKS if depth >= 1 else 0],
             "events": entity_data.get("events", [])[: CAP_EVENTS if depth >= 1 else 0],
+            "engagements": entity_data.get("engagements", [])[
+                : CAP_EVENTS if depth >= 1 else 0
+            ],
             "recent_mentions": mentions,
             "recent_mentions_truncated": ment_trunc,
             "recent_mentions_total": ment_total,
@@ -530,14 +617,44 @@ class VaultIntelligenceTools:
             date = ev.get("event_date", "")
             if not in_range(date):
                 continue
-            items.append(
-                {
-                    "date": date,
-                    "type": "event",
-                    "path": ev["path"],
-                    "summary": ev.get("agent_context_of_target") or ev.get("display"),
-                }
-            )
+            item = {
+                "date": date,
+                "type": "event",
+                "path": ev["path"],
+                "summary": ev.get("agent_context_of_target") or ev.get("display"),
+            }
+            for key in (
+                "event_type",
+                "touchpoint_type",
+                "parent_engagement",
+                "adoption_stage",
+                "channel",
+            ):
+                if ev.get(key):
+                    item[key] = ev[key]
+            items.append(item)
+
+        for eng in entity_data.get("engagements", []):
+            # Surface next_touch / trial milestones on the customer timeline.
+            for date_key, label in (
+                ("next_touch", "next_touch"),
+                ("trial_end", "trial_end"),
+                ("trial_start", "trial_start"),
+            ):
+                date = eng.get(date_key) or ""
+                if not in_range(date):
+                    continue
+                items.append(
+                    {
+                        "date": date,
+                        "type": f"engagement_{label}",
+                        "path": eng["path"],
+                        "summary": eng.get("agent_context") or eng.get("display"),
+                        "engagement_type": eng.get("engagement_type", ""),
+                        "adoption_health": eng.get("adoption_health", ""),
+                        "next_touch_type": eng.get("next_touch_type", ""),
+                    }
+                )
 
         corpus_notes = await self._all_notes(scope, include_sections=False)
         notes_by_key = self.corpus.index_by_path(corpus_notes)
@@ -651,6 +768,7 @@ class VaultIntelligenceTools:
         missing_connections: List[str] = []
         broken_links: List[dict] = []
         invalid_event_type: List[str] = []
+        invalid_touchpoint_type: List[str] = []
         alias_map: Dict[str, List[str]] = {}
         inbound: Dict[str, int] = {normalize_path_key(n.path): 0 for n in notes}
 
@@ -668,6 +786,11 @@ class VaultIntelligenceTools:
                 et = str(fm.get("event_type", "")).strip().lower()
                 if et and et not in EVENT_TYPES:
                     invalid_event_type.append(f"{note.path} (event_type: {et})")
+                tt = str(fm.get("touchpoint_type", "")).strip().lower()
+                if tt and tt not in TOUCHPOINT_TYPES:
+                    invalid_touchpoint_type.append(
+                        f"{note.path} (touchpoint_type: {tt})"
+                    )
 
             for alias in note.aliases:
                 alias_map.setdefault(alias, []).append(note.path)
@@ -703,6 +826,7 @@ class VaultIntelligenceTools:
                 "missing_connections_section": len(missing_connections),
                 "broken_wikilinks": len(broken_links),
                 "invalid_event_type": len(invalid_event_type),
+                "invalid_touchpoint_type": len(invalid_touchpoint_type),
                 "orphan_entities": len(orphans),
                 "alias_collisions": len(alias_collisions),
             },
@@ -710,6 +834,7 @@ class VaultIntelligenceTools:
             "missing_connections_section": missing_connections[:50],
             "broken_wikilinks": broken_links[:50],
             "invalid_event_type": invalid_event_type[:50],
+            "invalid_touchpoint_type": invalid_touchpoint_type[:50],
             "orphan_entities": orphans[:50],
             "alias_collisions": alias_collisions[:20],
         }

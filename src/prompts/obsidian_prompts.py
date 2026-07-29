@@ -176,12 +176,22 @@ The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 - **`## Source History`** holds dated mention lines with wikilinks.
 - **`agent_context`** is the one-line summary — intelligence tools return this instead of full bodies.
 
+### Engagements vs events
+
+- **Engagements** (detail) live at `12_engagements/YYYY-MM-DD_kebab.md` (`type: engagement`). Prefer **`create_engagement`**.
+  - `build-with-me` = parent **adoption program** for a ~1-month enterprise trial (trial window, planned touchpoints, scorecard).
+  - `technical-deep-dive` = specialist architecture / advanced use-case pull-in from another VE.
+  - Other types (`hackathon`, `workshop`, `demo`, `partner-review`, `consulting`, `ve-assist`) are usually atomic sessions.
+- **Events** (graph nodes) live at `entities/event/{YYYY-MM-DD}-{slug}-{event_type}.md`. Prefer **`create_event`**.
+- Child interactions link to parents via `parent_engagement` + `source_note`. Parent notes get an idempotent **`## Interactions`** roll-up.
+
 ### Event entities (`entity_type: event`)
 
-- Live at `entities/event/{YYYY-MM-DD}-{slug}-{event_type}.md`. They represent a single interaction (call, build session, presentation, etc.) as a graph node.
-- **`event_type`** controlled vocabulary (9 values): `discovery-call`, `build-with-me`, `poc-presentation`, `workshop`, `internal-sync`, `all-hands`, `demo`, `partner-review`, `other`.
-- Required frontmatter: `entity_type`, `event_type`, `event_date`, `agent_context`, `last_updated`. Their graph edges are **frontmatter-sourced** (`customer`, `organizations`, `participants`, `concepts`) rather than body links — the intelligence tools index these so an event still shows up as a backlink of the orgs/people/concepts it references.
-- Customer / company / partner / person / internal-stakeholder cards carry an idempotent **`## Events`** back-ref block (one `[[event]]` per line, date-descending). `resolve_entity` / `get_dossier` surface this as an `events` list — use it for an entity's interaction timeline instead of scanning.
+- Represent a single interaction (call, build session, email follow-up, support touch, etc.) as a graph node.
+- **`event_type`** controlled vocabulary (10 values): `discovery-call`, `build-with-me`, `poc-presentation`, `workshop`, `internal-sync`, `all-hands`, `demo`, `partner-review`, `technical-deep-dive`, `other`.
+- Optional BWM/specialist fields: `parent_engagement`, `touchpoint_type` (`kickoff-workshop` / `email-follow-up` / `mid-trial-review` / `support` / `technical-question` / `final-review` / `ad-hoc`), `channel`, `adoption_stage`, `requested_by`, `technical_domains`, `signal_confidence`.
+- Required frontmatter: `entity_type`, `event_type`, `event_date`, `agent_context`, `last_updated`. Graph edges are **frontmatter-sourced** (`customer`, `organizations`, `participants`, `concepts`).
+- Customer / company / partner / person / internal-stakeholder cards carry an idempotent **`## Events`** back-ref block. `resolve_entity` / `get_dossier` also surface linked `12_engagements/` notes as an `engagements` list (trial window, `next_touch`, adoption health).
 
 ### Wikilink styles (both resolve)
 
@@ -199,7 +209,7 @@ Key paths: `entities/{entity_type}/` (knowledge graph, including `entities/event
 
 | Goal | Tool | Arguments / notes |
 |------|------|-------------------|
-| Look up customer, person, partner, concept, event by name or alias | **`resolve_entity`** | `name` (fuzzy/alias OK, e.g. `Gojab` → GoJob); `scope=work`. Returns path, `agent_context`, connections (with target context), backlinks, `events` list, recent Source History. **One call replaces many search/read cycles.** |
+| Look up customer, person, partner, concept, event by name or alias | **`resolve_entity`** | `name` (fuzzy/alias OK, e.g. `Gojab` → GoJob); `scope=work`. Returns path, `agent_context`, connections (with target context), backlinks, `events` list, linked `engagements` (BWM programs / deep-dives), recent Source History. **One call replaces many search/read cycles.** |
 | Filter by frontmatter (live, not index files) | **`query_frontmatter`** | `filters` object, AND semantics, e.g. `{entity_type: customer, poc_stage: discovery}` or `{entity_type: event, event_type: discovery-call}`; optional `folder`, `tag`; `scope=work`. Returns path + `agent_context` only (max 50). |
 | Meeting prep / stakeholder brief | **`get_dossier`** | `name` (same as resolve_entity); `scope=work`; optional `since` (YYYY-MM-DD) adds a `changes_since` block. Wraps resolve_entity + open questions + cross-vault recent mentions + the entity's `events`. |
 | Check convention drift | **`lint_vault`** | optional `scope`, `folder` (default `entities`). Read-only unless `fix=true`. |
@@ -226,7 +236,8 @@ After intelligence tools return a **path**, call **`read_note`** only when you n
 | Check existence | `note_exists` | Same pattern as read |
 | Create | `create_note` | `path`, `content`; `scope` if multi-scope key |
 | Quick-capture to root inbox | **`capture`** | **No scope.** `title`, `content`, `source`, `capture_type` (thought/post/excerpt), `spark`, `captured`. Writes `type: capture` to root `01_seeds/`. |
-| Create an **event** entity | `create_event` | `event_type` (required, controlled vocab); optional `customer`, `participants`, `organizations`, `concepts`, `event_date`, `agent_context`, `outcome`. Builds the canonical filename + schema-valid frontmatter and updates `## Events` back-refs. `scope=work`. |
+| Create a VE **engagement** (parent note) | `create_engagement` | `engagement_type` (required); optional `customer`/`partner`, `date`, BWM fields (`trial_start`/`trial_end`/`next_touch`/…), deep-dive fields (`owning_ve`/`requested_by`/`technical_domains`). Writes `12_engagements/`. `scope=work`. |
+| Create an **event** entity (child interaction) | `create_event` | `event_type` (required); optional `customer`, `participants`, `parent_engagement`, `touchpoint_type`, `channel`, `adoption_stage`, `requested_by`, `technical_domains`, `outcome`. Updates `## Events` + parent `## Interactions`. `scope=work`. |
 | Replace body | `update_note` | `scope` if multi-scope key |
 | Append | `append_note` | `scope` if multi-scope key |
 | Delete | `delete_note` | `scope` if multi-scope key |
@@ -250,6 +261,14 @@ Use only registered tool names (legacy `obs_*` names are not available).
 
 **Before a meeting**:
 1. `get_dossier(name="gojob", scope="work")` — includes the customer's `events` timeline.
+
+**Starting a Build-with-Me adoption program**:
+1. `create_engagement(engagement_type="build-with-me", customer="4flow", date="2026-07-23", trial_start="2026-07-23", trial_end="2026-08-31", next_touch="2026-07-29", next_touch_type="mid-trial-review", scope="work")`
+2. Log each touch: `create_event(event_type="build-with-me", touchpoint_type="kickoff-workshop", parent_engagement="2026-07-23_4flow-build-with-me", customer="4flow", scope="work")`
+
+**Logging a technical deep-dive** (specialist pull-in):
+1. `create_engagement(engagement_type="technical-deep-dive", customer="Acme", owning_ve="other-ve", technical_domains=["mcp","sap-onprem"], scope="work")`
+2. `create_event(event_type="technical-deep-dive", parent_engagement=<stem>, customer="Acme", requested_by="other-ve", scope="work")`
 
 **Logging a new interaction** (call, build session, demo…):
 1. `create_event(event_type="discovery-call", customer="GoJob", participants=["Julien"], event_date="2026-06-01", scope="work")` — handles filename, frontmatter, and `## Events` back-refs. Prefer this over hand-building an event card with `create_note`.

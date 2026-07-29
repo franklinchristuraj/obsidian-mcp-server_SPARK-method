@@ -147,6 +147,48 @@ class TestCreateNoteTemplates(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.created, [])
 
 
+class TestEngagementTemplateRouting(unittest.TestCase):
+    def test_engagement_subtype_template_paths(self) -> None:
+        from src.utils.template_utils import template_detector
+
+        self.assertEqual(
+            template_detector.get_template_path_for_folder(
+                "12_engagements/x.md", "work", engagement_type="build-with-me"
+            ),
+            "work/00_system/templates/build-with-me-engagement.md",
+        )
+        self.assertEqual(
+            template_detector.get_template_path_for_folder(
+                "12_engagements/x.md", "work", engagement_type="technical-deep-dive"
+            ),
+            "work/00_system/templates/technical-deep-dive.md",
+        )
+        self.assertEqual(
+            template_detector.get_template_path_for_folder(
+                "12_engagements/x.md", "work", engagement_type="demo"
+            ),
+            "work/00_system/templates/ve-engagement.md",
+        )
+
+    def test_build_engagement_note_from_data_bwm_fields(self) -> None:
+        from src.utils.template_utils import build_engagement_note_from_data
+
+        fm, body = build_engagement_note_from_data(
+            title="Claroty BWM",
+            engagement_type="build-with-me",
+            date="2026-07-01",
+            customer="Claroty",
+            trial_start="2026-07-01",
+            trial_end="2026-07-31",
+            next_touch="2026-07-08",
+            next_touch_type="mid-trial-review",
+        )
+        self.assertEqual(fm["engagement_type"], "build-with-me")
+        self.assertEqual(fm["trial_end"], "2026-07-31")
+        self.assertIn("## Planned touchpoints", body)
+        self.assertIn("## High-signal debrief", body)
+
+
 class TestReadVaultTemplate(unittest.IsolatedAsyncioTestCase):
     async def test_tries_fallback_when_primary_missing(self) -> None:
         from src.utils.template_utils import read_vault_template

@@ -60,7 +60,7 @@ class MCPProtocolHandler:
             "description": (
                 "Obsidian MCP server (v2.1.0): workspace-scoped CRUD (personal / passion / work), "
                 "vault intelligence (resolve_entity, query_frontmatter, get_dossier, graph/timeline tools, "
-                "lint_vault, build_context), capture inbox, and create_event. "
+                "lint_vault, build_context), capture inbox, create_event, and create_engagement. "
                 "Load MCP prompt vault_mcp_agent_guide first."
             ),
         }
