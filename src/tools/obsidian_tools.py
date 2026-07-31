@@ -34,6 +34,8 @@ from src.vault_intelligence.parser import (
     INTERACTIONS_HEADING,
     ParsedNote,
     SIGNAL_CONFIDENCE,
+    SNAPSHOT_MODE,
+    SNAPSHOT_SOURCE,
     TOUCHPOINT_TYPES,
     extract_all_wikilink_targets,
     normalize_link_target,
@@ -398,6 +400,15 @@ _TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
         "idempotentHint": False,
         "openWorldHint": False,
     },
+    "capture_snapshot": {
+        "title": "Capture Metric Snapshot",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    "engagement_delta": {"title": "Engagement Delta", **_READ_ONLY},
+    "impact_rollup": {"title": "Impact Rollup", **_READ_ONLY},
 }
 
 # MCP 2025-06-18 outputSchema per tool, describing the structuredContent each
@@ -765,6 +776,69 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "required": ["path", "scope", "engagement_type", "date"],
     },
+    "capture_snapshot": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "org_id": {"type": "string"},
+            "captured": {"type": "string"},
+            "source": {"type": "string"},
+            "mode": {"type": "string"},
+            "json_path": {"type": "string"},
+            "markdown_path": {"type": "string"},
+            "operation": {"type": "string", "enum": ["created", "updated"]},
+        },
+        "required": [
+            "org_id",
+            "captured",
+            "source",
+            "mode",
+            "json_path",
+            "markdown_path",
+            "operation",
+        ],
+    },
+    "engagement_delta": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "org_id": {"type": "string"},
+            "engagement_path": {"type": "string"},
+            "engagement_date": {"type": "string"},
+            "windows": {"type": "object"},
+            "deltas": {"type": "object"},
+            "error": {"type": "string"},
+        },
+        "required": ["engagement_path", "windows", "deltas"],
+    },
+    "impact_rollup": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "from": {"type": "string"},
+            "to": {"type": "string"},
+            "filters": {"type": "object"},
+            "redacted": {"type": "boolean"},
+            "engagement_count": {"type": "integer"},
+            "contributed_pipeline": {"type": "number"},
+            "pending_follow_up": {"type": "integer"},
+            "headline": {"type": "string"},
+            "metric_deltas": {"type": "object"},
+            "records": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": [
+            "from",
+            "to",
+            "filters",
+            "redacted",
+            "engagement_count",
+            "contributed_pipeline",
+            "pending_follow_up",
+            "headline",
+            "metric_deltas",
+            "records",
+        ],
+    },
 }
 
 
@@ -817,6 +891,9 @@ OBSIDIAN_TOOL_DISPATCH: Dict[str, str] = {
     "capture": "capture_seed",
     "create_event": "create_event",
     "create_engagement": "create_engagement",
+    "capture_snapshot": "capture_snapshot",
+    "engagement_delta": "engagement_delta",
+    "impact_rollup": "impact_rollup",
 }
 
 OBSIDIAN_ROUTED_TOOL_NAMES = frozenset(OBSIDIAN_TOOL_DISPATCH.keys())
@@ -1714,6 +1791,111 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     },
                 },
                 ["engagement_type"],
+            ),
+            _tool(
+                "capture_snapshot",
+                (
+                    "Idempotently write a canonical JSON metric snapshot and a "
+                    "Dataview-compatible Markdown mirror under "
+                    "12_engagements/_snapshots/{org_id}/{date}. Use scope=work."
+                ),
+                {
+                    "org_id": {
+                        "type": "string",
+                        "description": "Stable Salesforce/C360 organization join key.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Snapshot capture date in YYYY-MM-DD format.",
+                    },
+                    "metrics": {
+                        "type": "object",
+                        "description": "Schema-free metric names and values.",
+                        "additionalProperties": True,
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": sorted(SNAPSHOT_SOURCE),
+                        "description": "System from which the metrics were captured.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": sorted(SNAPSHOT_MODE),
+                        "description": "Whether the point is live or reconstructed.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["work"],
+                        "default": "work",
+                    },
+                },
+                ["org_id", "date", "metrics", "source", "mode"],
+            ),
+            _tool(
+                "engagement_delta",
+                (
+                    "Compare metric snapshots around a work engagement. Each requested "
+                    "window resolves to the nearest snapshot within 14 days; gaps are "
+                    "flagged and reconstructed modes remain visible."
+                ),
+                {
+                    "engagement_path": {
+                        "type": "string",
+                        "description": "Workspace-relative note path in 12_engagements/.",
+                    },
+                    "windows": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "default": [-30, 0, 30, 90],
+                        "description": "Day offsets relative to the engagement date.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["work"],
+                        "default": "work",
+                    },
+                },
+                ["engagement_path"],
+            ),
+            _tool(
+                "impact_rollup",
+                (
+                    "Aggregate engagement metric deltas and corroborated commercial "
+                    "outcomes over an inclusive date range. Set redact=true for the "
+                    "hosted, identity-safe record projection."
+                ),
+                {
+                    "from": {
+                        "type": "string",
+                        "description": "Inclusive engagement start date, YYYY-MM-DD.",
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Inclusive engagement end date, YYYY-MM-DD.",
+                    },
+                    "filters": {
+                        "type": "object",
+                        "properties": {
+                            "why_called": {},
+                            "engagement_type": {},
+                            "owning_ve": {},
+                        },
+                        "additionalProperties": False,
+                        "default": {},
+                        "description": "Optional AND filters over engagement frontmatter.",
+                    },
+                    "redact": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Remove identity and record-level commercial data.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["work"],
+                        "default": "work",
+                    },
+                },
+                ["from", "to"],
             ),
         ]
         return tools
@@ -2972,6 +3154,58 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Dict[str, Any]:
         return await self._get_vault_intel().build_context(
             seed, scope=scope, depth=depth, token_budget=token_budget
+        )
+
+    @_write_locked
+    async def capture_snapshot(
+        self,
+        org_id: str,
+        date: str,
+        metrics: Dict[str, Any],
+        source: str,
+        mode: str,
+        scope: str = "work",
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().capture_snapshot(
+            org_id=org_id,
+            date=date,
+            metrics=metrics,
+            source=source,
+            mode=mode,
+            scope=scope,
+        )
+
+    async def engagement_delta(
+        self,
+        engagement_path: str,
+        windows: Optional[List[int]] = None,
+        scope: str = "work",
+    ) -> Dict[str, Any]:
+        return await self._get_vault_intel().engagement_delta(
+            engagement_path=engagement_path,
+            windows=windows,
+            scope=scope,
+        )
+
+    async def impact_rollup(
+        self,
+        to: str,
+        filters: Optional[Dict[str, Any]] = None,
+        redact: bool = False,
+        scope: str = "work",
+        **arguments: Any,
+    ) -> Dict[str, Any]:
+        from_date = arguments.pop("from", None)
+        if arguments:
+            raise ValueError(f"Unexpected arguments: {sorted(arguments)}")
+        if not from_date:
+            raise ValueError("from is required")
+        return await self._get_vault_intel().impact_rollup(
+            from_date=from_date,
+            to_date=to,
+            filters=filters,
+            redact=redact,
+            scope=scope,
         )
 
     # =================== Tool Dispatcher ===================

@@ -5,6 +5,8 @@ from src.mcp_server import mcp_handler
 from src.tools.obsidian_tools import (
     OBSIDIAN_TOOL_DISPATCH,
     OBSIDIAN_ROUTED_TOOL_NAMES,
+    _TOOL_ANNOTATIONS,
+    _TOOL_OUTPUT_SCHEMAS,
     obsidian_tools,
 )
 
@@ -39,6 +41,14 @@ class TestToolRegistryContract(unittest.TestCase):
         self.assertTrue(obs_names <= handler_names)
         self.assertEqual(handler_names - obs_names, {"ping"})
         self.assertEqual(len(handler_names), len(set(handler_names)))
+        self.assertEqual(len(handler_names), 30)
+
+    def test_every_obsidian_tool_has_contract_metadata(self) -> None:
+        for tool in obsidian_tools.get_tools():
+            self.assertIn(tool.name, _TOOL_ANNOTATIONS)
+            self.assertIn(tool.name, _TOOL_OUTPUT_SCHEMAS)
+            self.assertIsNotNone(tool.annotations)
+            self.assertIsNotNone(tool.outputSchema)
 
 
 if __name__ == "__main__":

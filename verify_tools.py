@@ -5,13 +5,15 @@ Verifies that all tools are properly registered and functioning
 """
 import sys
 import asyncio
-from typing import Dict, Any, List
 
 # Add src to path
 sys.path.insert(0, '.')
 
-from src.mcp_server import mcp_handler
-from src.tools.obsidian_tools import obsidian_tools
+from src.mcp_server import mcp_handler  # noqa: E402
+from src.tools.obsidian_tools import (  # noqa: E402
+    OBSIDIAN_TOOL_DISPATCH,
+    obsidian_tools,
+)
 
 
 def verify_tool_registration():
@@ -23,34 +25,7 @@ def verify_tool_registration():
     registered_tools = mcp_handler.tools
     print(f"\n📊 Total tools registered: {len(registered_tools)}")
     
-    expected_tools = [
-        "ping",
-        "workspaces",
-        "vault_structure",
-        "list_notes",
-        "list_journal",
-        "search",
-        "read_note",
-        "create_note",
-        "update_note",
-        "append_note",
-        "note_exists",
-        "delete_note",
-        "resolve_entity",
-        "query_frontmatter",
-        "get_dossier",
-        "lint_vault",
-        "get_backlinks",
-        "get_neighbors",
-        "find_path",
-        "graph_health",
-        "timeline",
-        "last_touch",
-        "build_context",
-        "capture",
-        "create_event",
-        "create_engagement",
-    ]
+    expected_tools = ["ping", *OBSIDIAN_TOOL_DISPATCH.keys()]
 
     registered_names = [tool.name for tool in registered_tools]
     if len(registered_names) != len(set(registered_names)):

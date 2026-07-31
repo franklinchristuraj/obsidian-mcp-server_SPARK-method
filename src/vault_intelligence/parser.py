@@ -82,6 +82,8 @@ ADOPTION_STAGES = frozenset(
 ADOPTION_HEALTH = frozenset(
     {"on-track", "at-risk", "stalled", "converted", "churned"}
 )
+SNAPSHOT_SOURCE = frozenset({"c360"})
+SNAPSHOT_MODE = frozenset({"live", "reconstructed"})
 CHANNELS = frozenset(
     {"workshop", "call", "email", "slack", "async", "office-hours"}
 )

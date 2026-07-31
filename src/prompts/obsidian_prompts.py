@@ -193,6 +193,13 @@ The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 - Required frontmatter: `entity_type`, `event_type`, `event_date`, `agent_context`, `last_updated`. Graph edges are **frontmatter-sourced** (`customer`, `organizations`, `participants`, `concepts`).
 - Customer / company / partner / person / internal-stakeholder cards carry an idempotent **`## Events`** back-ref block. `resolve_entity` / `get_dossier` also surface linked `12_engagements/` notes as an `engagements` list (trial window, `next_touch`, adoption health).
 
+### Impact System snapshots
+
+- **`capture_snapshot`** writes an idempotent canonical JSON + Dataview Markdown pair at `12_engagements/_snapshots/{org_id}/{date}`. Required: `org_id`, `date`, schema-free `metrics`, `source`, `mode` (`live` or `reconstructed`); `scope=work`.
+- **`engagement_delta`** resolves snapshots around an engagement's `date` using its exact `org_id`. Default windows are `[-30, 0, +30, +90]`; the nearest point within ±14 days is used, equal-distance ties prefer the earlier point, and missing windows are explicit. Modes are propagated and gaps are never interpolated.
+- **`impact_rollup`** aggregates deltas for engagements in an inclusive `from`/`to` range. Optional filters (`why_called`, `engagement_type`, `owning_ve`) use AND semantics. `redact=true` returns the identity-safe hosted projection.
+- Never infer an `org_id`, hide a missing window, or blend a reconstructed point without preserving its mode.
+
 ### Wikilink styles (both resolve)
 
 Event entities use **bare** links (`[[claroty]]`, `[[2026-05-01-claroty-discovery-call]]`) relying on alias/name resolution, while legacy cards use **full-path** links (`[[entities/customer/claroty.md]]`). The vault intelligence tools resolve **both** forms to the canonical path, so connections, backlinks, and `lint_vault` treat them interchangeably.
@@ -220,6 +227,8 @@ Key paths: `entities/{entity_type}/` (knowledge graph, including `entities/event
 | Ordered interaction history for an entity | **`timeline`** | `name`; `scope=work`; optional `start`/`end` (YYYY-MM-DD). Events + dated Source History mentions + connected-note `last_updated` timestamps, newest first. |
 | "What's gone quiet" — most recent interaction | **`last_touch`** | `name`; `scope=work`. Latest `timeline` item only. |
 | Budget-bounded, graph-augmented context pack (multi-hop research/prep) | **`build_context`** | `seed` (entity name, or free text — falls back to ranked search); `scope=work`; optional `depth` (default 1), `token_budget` (default 4000). Typed neighbors first, then related_to, then mentions; returns a `context_pack` + `source_manifest`. |
+| Compare adoption metrics around one engagement | **`engagement_delta`** | `engagement_path`; optional `windows`; `scope=work`. Requires the note's `org_id`. |
+| Aggregate engagement impact for a period | **`impact_rollup`** | `from`, `to`; optional AND `filters`, `redact`; `scope=work`. |
 
 After intelligence tools return a **path**, call **`read_note`** only when you need the **full markdown body**.
 
@@ -238,6 +247,7 @@ After intelligence tools return a **path**, call **`read_note`** only when you n
 | Quick-capture to root inbox | **`capture`** | **No scope.** `title`, `content`, `source`, `capture_type` (thought/post/excerpt), `spark`, `captured`. Writes `type: capture` to root `01_seeds/`. |
 | Create a VE **engagement** (parent note) | `create_engagement` | `engagement_type` (required); optional `customer`/`partner`, `date`, BWM fields (`trial_start`/`trial_end`/`next_touch`/…), deep-dive fields (`owning_ve`/`requested_by`/`technical_domains`). Writes `12_engagements/`. `scope=work`. |
 | Create an **event** entity (child interaction) | `create_event` | `event_type` (required); optional `customer`, `participants`, `parent_engagement`, `touchpoint_type`, `channel`, `adoption_stage`, `requested_by`, `technical_domains`, `outcome`. Updates `## Events` + parent `## Interactions`. `scope=work`. |
+| Capture a paired metric snapshot | `capture_snapshot` | `org_id`, `date`, `metrics`, `source`, `mode`; writes JSON + Markdown idempotently; `scope=work`. |
 | Replace body | `update_note` | `scope` if multi-scope key |
 | Append | `append_note` | `scope` if multi-scope key |
 | Delete | `delete_note` | `scope` if multi-scope key |

@@ -4,10 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-from datetime import datetime
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+import yaml
 
 from src.scope import active_scopes_for_read, get_effective_workspace_context
 
@@ -19,6 +23,8 @@ from .parser import (
     EVENT_TYPES,
     EVENTS_HEADING,
     OPEN_QUESTIONS_HEADING,
+    SNAPSHOT_MODE,
+    SNAPSHOT_SOURCE,
     TOUCHPOINT_TYPES,
     extract_section_links,
     extract_source_history_entries,
@@ -64,6 +70,14 @@ CAP_CONNECTIONS = 20
 CAP_BACKLINKS = 20
 CAP_QUERY_RESULTS = 50
 CAP_DOSSIER_MENTIONS = 5
+SNAPSHOT_MATCH_TOLERANCE_DAYS = 14
+_SNAPSHOT_RESERVED_KEYS = frozenset({"org_id", "captured", "source", "mode"})
+_IMPACT_FILTER_KEYS = frozenset({"why_called", "engagement_type", "owning_ve"})
+_SAFE_ORG_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_REDACTED_METRIC_KEY_RE = re.compile(
+    r"(?:^|_)(?:arr|customer|partner|person|name|email|revenue|price|amount)(?:_|$)",
+    re.IGNORECASE,
+)
 
 
 def _json_result(payload: Any) -> Dict[str, Any]:
@@ -143,6 +157,109 @@ def _value_matches(actual: Any, expected: Any) -> bool:
     if isinstance(actual, list):
         return any(_scalar_match(item, expected) for item in actual)
     return _scalar_match(actual, expected)
+
+
+def _parse_iso_date(value: Any, field: str = "date") -> date:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be YYYY-MM-DD") from exc
+
+
+def _window_key(days: int) -> str:
+    return f"+{days}" if days > 0 else str(days)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _format_currency(value: float) -> str:
+    if value >= 1_000_000:
+        amount = f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"${amount}M"
+    if value >= 1_000:
+        amount = f"{value / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"${amount}K"
+    return f"${value:,.0f}"
+
+
+def _redact_metric_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact_metric_data(item)
+            for key, item in value.items()
+            if not _REDACTED_METRIC_KEY_RE.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_redact_metric_data(item) for item in value]
+    return value
+
+
+def _redact_windows(windows: Dict[str, dict]) -> Dict[str, dict]:
+    redacted: Dict[str, dict] = {}
+    for key, window in windows.items():
+        safe = {
+            field: value
+            for field, value in window.items()
+            if field
+            in {
+                "missing",
+                "target_date",
+                "window_days",
+                "date",
+                "offset_days",
+                "mode",
+                "source",
+            }
+        }
+        if isinstance(window.get("metrics"), dict):
+            safe["metrics"] = {
+                metric: value
+                for metric, value in window["metrics"].items()
+                if _is_number(value)
+                and not _REDACTED_METRIC_KEY_RE.search(str(metric))
+            }
+        redacted[key] = safe
+    return redacted
+
+
+def _paired_atomic_write(
+    json_path: Path,
+    json_content: str,
+    markdown_path: Path,
+    markdown_content: str,
+) -> None:
+    """Replace a snapshot pair, restoring the old pair if either replace fails."""
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    old_json = json_path.read_bytes() if json_path.is_file() else None
+    old_markdown = markdown_path.read_bytes() if markdown_path.is_file() else None
+    token = f"{os.getpid()}-{time.time_ns()}"
+    json_tmp = json_path.parent / f".{json_path.name}.tmp-{token}"
+    markdown_tmp = markdown_path.parent / f".{markdown_path.name}.tmp-{token}"
+
+    try:
+        json_tmp.write_text(json_content, encoding="utf-8")
+        markdown_tmp.write_text(markdown_content, encoding="utf-8")
+        os.replace(json_tmp, json_path)
+        try:
+            os.replace(markdown_tmp, markdown_path)
+        except Exception:
+            if old_json is None:
+                json_path.unlink(missing_ok=True)
+            else:
+                restore = json_path.parent / f".{json_path.name}.restore-{token}"
+                restore.write_bytes(old_json)
+                os.replace(restore, json_path)
+            raise
+    except Exception:
+        json_tmp.unlink(missing_ok=True)
+        markdown_tmp.unlink(missing_ok=True)
+        if old_markdown is not None and not markdown_path.is_file():
+            restore = markdown_path.parent / f".{markdown_path.name}.restore-{token}"
+            restore.write_bytes(old_markdown)
+            os.replace(restore, markdown_path)
+        raise
 
 
 class VaultIntelligenceTools:
@@ -499,6 +616,548 @@ class VaultIntelligenceTools:
         }
         if truncated:
             payload["note"] = f"Filter matched {total} notes; showing first {CAP_QUERY_RESULTS}."
+        return _json_result(payload)
+
+    @staticmethod
+    def _validate_org_id(org_id: str) -> str:
+        normalized = str(org_id or "").strip()
+        if not normalized:
+            raise ValueError("org_id is required")
+        if not _SAFE_ORG_ID_RE.fullmatch(normalized) or ".." in normalized:
+            raise ValueError("org_id contains invalid characters")
+        return normalized
+
+    def _work_snapshot_root(self, org_id: str) -> Path:
+        root = (
+            self.corpus.vault_path / "work" / "12_engagements" / "_snapshots"
+        ).resolve()
+        target = (root / org_id).resolve()
+        if root not in target.parents:
+            raise ValueError("org_id resolves outside the snapshot folder")
+        return target
+
+    def _normalize_snapshot_input(
+        self,
+        org_id: str,
+        date_value: str,
+        metrics: dict,
+        source: str,
+        mode: str,
+        scope: str,
+    ) -> Tuple[str, str, str, str]:
+        if scope != "work":
+            raise ValueError("capture_snapshot only supports scope='work'")
+        self._resolve_scopes("work")
+        normalized_org_id = self._validate_org_id(org_id)
+        captured = _parse_iso_date(date_value).isoformat()
+        if not isinstance(metrics, dict):
+            raise ValueError("metrics must be an object")
+        collisions = sorted(_SNAPSHOT_RESERVED_KEYS.intersection(metrics))
+        if collisions:
+            raise ValueError(f"metrics contains reserved keys: {collisions}")
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source not in SNAPSHOT_SOURCE:
+            raise ValueError(f"source must be one of {sorted(SNAPSHOT_SOURCE)}")
+        normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode not in SNAPSHOT_MODE:
+            raise ValueError(f"mode must be one of {sorted(SNAPSHOT_MODE)}")
+        return normalized_org_id, captured, normalized_source, normalized_mode
+
+    @staticmethod
+    def _snapshot_contents(
+        org_id: str,
+        captured: str,
+        metrics: dict,
+        source: str,
+        mode: str,
+    ) -> Tuple[str, str]:
+        payload = {
+            "org_id": org_id,
+            "captured": captured,
+            **metrics,
+            "source": source,
+            "mode": mode,
+        }
+        frontmatter = {
+            "type": "metric-snapshot",
+            **payload,
+            "agent_context": (
+                f"Metric snapshot for {org_id}, captured {captured} from {source}."
+            ),
+            "tags": ["metric-snapshot", "ctx/work"],
+        }
+        yaml_text = yaml.safe_dump(
+            frontmatter, sort_keys=False, allow_unicode=True, default_flow_style=False
+        ).rstrip()
+        rows = "\n".join(
+            f"| {key} | {json.dumps(value, ensure_ascii=False)} |"
+            for key, value in metrics.items()
+        )
+        markdown = (
+            f"---\n{yaml_text}\n---\n\n# Metric Snapshot — {captured}\n\n"
+            f"| Metric | Value |\n|---|---:|\n{rows}\n"
+        )
+        return json.dumps(payload, indent=2, ensure_ascii=False) + "\n", markdown
+
+    async def capture_snapshot(
+        self,
+        org_id: str,
+        date: str,
+        metrics: dict,
+        source: str,
+        mode: str,
+        scope: str = "work",
+    ) -> Dict[str, Any]:
+        org_id, captured, source, mode = self._normalize_snapshot_input(
+            org_id, date, metrics, source, mode, scope
+        )
+        json_text, markdown = self._snapshot_contents(
+            org_id, captured, metrics, source, mode
+        )
+        directory = self._work_snapshot_root(org_id)
+        json_path = directory / f"{captured}.json"
+        markdown_path = directory / f"{captured}.md"
+        existed = json_path.is_file() and markdown_path.is_file()
+        await asyncio.to_thread(
+            _paired_atomic_write,
+            json_path,
+            json_text,
+            markdown_path,
+            markdown,
+        )
+        self.corpus._invalidate(
+            "work", f"12_engagements/_snapshots/{org_id}/{captured}.md"
+        )
+        return _json_result(
+            {
+                "org_id": org_id,
+                "captured": captured,
+                "source": source,
+                "mode": mode,
+                "json_path": f"12_engagements/_snapshots/{org_id}/{captured}.json",
+                "markdown_path": f"12_engagements/_snapshots/{org_id}/{captured}.md",
+                "operation": "updated" if existed else "created",
+            }
+        )
+
+    @staticmethod
+    def _load_snapshot_file(path: Path, org_id: str) -> Optional[dict]:
+        try:
+            captured = _parse_iso_date(path.stem)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            valid = (
+                isinstance(data, dict)
+                and str(data.get("org_id") or "") == org_id
+                and str(data.get("captured") or "") == captured.isoformat()
+                and str(data.get("mode") or "") in SNAPSHOT_MODE
+            )
+            if not valid:
+                return None
+            return {
+                "captured_date": captured,
+                "date": captured.isoformat(),
+                "mode": data["mode"],
+                "source": data.get("source"),
+                "metrics": {
+                    key: value
+                    for key, value in data.items()
+                    if key not in _SNAPSHOT_RESERVED_KEYS
+                },
+            }
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed snapshot: %s", path)
+            return None
+
+    def _load_snapshots(self, org_id: str) -> List[dict]:
+        directory = self._work_snapshot_root(org_id)
+        if not directory.is_dir():
+            return []
+        snapshots = [
+            snapshot
+            for path in directory.glob("*.json")
+            if (snapshot := self._load_snapshot_file(path, org_id)) is not None
+        ]
+        return snapshots
+
+    @staticmethod
+    def _closest_snapshot(snapshots: List[dict], target: date) -> Optional[dict]:
+        candidates = [
+            snapshot
+            for snapshot in snapshots
+            if abs((snapshot["captured_date"] - target).days)
+            <= SNAPSHOT_MATCH_TOLERANCE_DAYS
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda snapshot: (
+                abs((snapshot["captured_date"] - target).days),
+                snapshot["captured_date"],
+            ),
+        )
+
+    @staticmethod
+    def _metric_interval(
+        metric: str,
+        from_key: str,
+        to_key: str,
+        start: dict,
+        finish: dict,
+    ) -> dict:
+        interval: Dict[str, Any] = {"from": from_key, "to": to_key}
+        if start.get("missing") or finish.get("missing"):
+            return {**interval, "missing": True}
+        from_value = start["metrics"].get(metric)
+        to_value = finish["metrics"].get(metric)
+        if not _is_number(from_value) or not _is_number(to_value):
+            return {**interval, "skipped": "nonnumeric_or_absent"}
+        absolute = to_value - from_value
+        interval.update(
+            {
+                "from_date": start["date"],
+                "to_date": finish["date"],
+                "from_mode": start["mode"],
+                "to_mode": finish["mode"],
+                "from_value": from_value,
+                "to_value": to_value,
+                "abs": absolute,
+                "pct": (
+                    round((absolute / from_value) * 100, 2)
+                    if from_value != 0
+                    else None
+                ),
+            }
+        )
+        if from_value == 0:
+            interval["pct_undefined_reason"] = "zero_baseline"
+        if start["mode"] != finish["mode"]:
+            interval["mixed_mode"] = True
+        return interval
+
+    @staticmethod
+    def _build_metric_deltas(
+        window_order: List[str], windows: Dict[str, dict]
+    ) -> Dict[str, List[dict]]:
+        metric_names = sorted(
+            {
+                metric
+                for window in windows.values()
+                for metric in (window.get("metrics") or {})
+            }
+        )
+        deltas: Dict[str, List[dict]] = {metric: [] for metric in metric_names}
+        for from_key, to_key in zip(window_order, window_order[1:]):
+            start = windows[from_key]
+            finish = windows[to_key]
+            for metric in metric_names:
+                deltas[metric].append(
+                    VaultIntelligenceTools._metric_interval(
+                        metric, from_key, to_key, start, finish
+                    )
+                )
+        return deltas
+
+    @staticmethod
+    def _normalize_engagement_path(engagement_path: str) -> str:
+        normalized = str(engagement_path or "").replace("\\", "/").lstrip("/")
+        path = Path(normalized)
+        invalid = (
+            not normalized
+            or ".." in path.parts
+            or not path.parts
+            or path.parts[0] != "12_engagements"
+            or "_snapshots" in path.parts
+        )
+        if invalid:
+            raise ValueError("engagement_path must be a note in 12_engagements/")
+        return normalized if path.suffix == ".md" else f"{normalized}.md"
+
+    @staticmethod
+    def _validate_windows(windows: Optional[List[int]]) -> List[int]:
+        requested = [-30, 0, 30, 90] if windows is None else windows
+        if not isinstance(requested, list) or not requested:
+            raise ValueError("windows must be a non-empty list of integers")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in requested):
+            raise ValueError("windows must contain integers")
+        if len(set(requested)) != len(requested):
+            raise ValueError("windows must not contain duplicates")
+        return requested
+
+    def _resolve_snapshot_windows(
+        self,
+        engagement_date: date,
+        requested: List[int],
+        snapshots: List[dict],
+    ) -> Tuple[List[str], Dict[str, dict]]:
+        output: Dict[str, dict] = {}
+        order: List[str] = []
+        for offset in requested:
+            key = _window_key(offset)
+            order.append(key)
+            target = engagement_date + timedelta(days=offset)
+            match = self._closest_snapshot(snapshots, target)
+            if match is None:
+                output[key] = {
+                    "missing": True,
+                    "target_date": target.isoformat(),
+                    "window_days": offset,
+                }
+                continue
+            output[key] = {
+                "date": match["date"],
+                "target_date": target.isoformat(),
+                "window_days": offset,
+                "offset_days": (match["captured_date"] - target).days,
+                "mode": match["mode"],
+                "source": match["source"],
+                "metrics": match["metrics"],
+            }
+        return order, output
+
+    async def engagement_delta(
+        self,
+        engagement_path: str,
+        windows: Optional[List[int]] = None,
+        scope: str = "work",
+    ) -> Dict[str, Any]:
+        if scope != "work":
+            raise ValueError("engagement_delta only supports scope='work'")
+        self._resolve_scopes("work")
+        normalized_path = self._normalize_engagement_path(engagement_path)
+        note = await asyncio.to_thread(
+            self.corpus.get_note, "work", normalized_path, include_sections=True
+        )
+        if note is None:
+            raise ValueError(f"Engagement note not found: {normalized_path}")
+
+        org_id = str(note.frontmatter.get("org_id") or "").strip()
+        if not org_id:
+            return _json_result(
+                {
+                    "error": "missing_org_id",
+                    "engagement_path": normalized_path,
+                    "windows": {},
+                    "deltas": {},
+                }
+            )
+        normalized_org_id = self._validate_org_id(org_id)
+        engagement_date = _parse_iso_date(
+            note.frontmatter.get("date"), field="engagement date"
+        )
+        requested = self._validate_windows(windows)
+        snapshots = await asyncio.to_thread(self._load_snapshots, normalized_org_id)
+        order, output_windows = self._resolve_snapshot_windows(
+            engagement_date, requested, snapshots
+        )
+        return _json_result(
+            {
+                "org_id": normalized_org_id,
+                "engagement_path": normalized_path,
+                "engagement_date": engagement_date.isoformat(),
+                "windows": output_windows,
+                "deltas": self._build_metric_deltas(order, output_windows),
+            }
+        )
+
+    @staticmethod
+    def _future_followup_count(notes: List[Any]) -> int:
+        today = date.today()
+        count = 0
+        for note in notes:
+            if str(note.frontmatter.get("status") or "").lower() == "closed":
+                continue
+            has_future = False
+            for key in ("followup_1", "followup_2", "followup_3"):
+                raw = note.frontmatter.get(key)
+                if not raw:
+                    continue
+                try:
+                    has_future = _parse_iso_date(raw, field=key) >= today
+                except ValueError:
+                    continue
+                if has_future:
+                    break
+            if has_future:
+                count += 1
+        return count
+
+    @staticmethod
+    def _aggregate_deltas(records: List[dict]) -> Dict[str, List[dict]]:
+        buckets: Dict[Tuple[str, str, str], dict] = {}
+        for record in records:
+            for metric, intervals in record.get("deltas", {}).items():
+                for interval in intervals:
+                    if "abs" not in interval:
+                        continue
+                    key = (metric, interval["from"], interval["to"])
+                    bucket = buckets.setdefault(
+                        key,
+                        {
+                            "from": interval["from"],
+                            "to": interval["to"],
+                            "from_total": 0,
+                            "to_total": 0,
+                            "contributing_engagements": 0,
+                            "modes": set(),
+                        },
+                    )
+                    bucket["from_total"] += interval["from_value"]
+                    bucket["to_total"] += interval["to_value"]
+                    bucket["contributing_engagements"] += 1
+                    bucket["modes"].update(
+                        (interval["from_mode"], interval["to_mode"])
+                    )
+        aggregated: Dict[str, List[dict]] = {}
+        for (metric, _from_key, _to_key), bucket in sorted(buckets.items()):
+            absolute = bucket["to_total"] - bucket["from_total"]
+            item = {
+                **bucket,
+                "abs": absolute,
+                "pct": (
+                    round((absolute / bucket["from_total"]) * 100, 2)
+                    if bucket["from_total"] != 0
+                    else None
+                ),
+                "modes": sorted(bucket["modes"]),
+            }
+            aggregated.setdefault(metric, []).append(item)
+        return aggregated
+
+    @staticmethod
+    def _validate_rollup_input(
+        from_date: str, to_date: str, filters: Optional[dict], scope: str
+    ) -> Tuple[date, date, dict]:
+        if scope != "work":
+            raise ValueError("impact_rollup only supports scope='work'")
+        start = _parse_iso_date(from_date, field="from")
+        finish = _parse_iso_date(to_date, field="to")
+        if start > finish:
+            raise ValueError("from must be on or before to")
+        active_filters = filters or {}
+        if not isinstance(active_filters, dict):
+            raise ValueError("filters must be an object")
+        unsupported = sorted(set(active_filters) - _IMPACT_FILTER_KEYS)
+        if unsupported:
+            raise ValueError(f"unsupported filters: {unsupported}")
+        return start, finish, active_filters
+
+    def _select_rollup_notes(
+        self, notes: List[Any], start: date, finish: date, filters: dict
+    ) -> List[Any]:
+        selected = []
+        for note in notes:
+            fm = note.frontmatter
+            if str(fm.get("type") or "") != "engagement":
+                continue
+            try:
+                note_date = _parse_iso_date(fm.get("date"))
+            except ValueError:
+                continue
+            if start <= note_date <= finish and self._frontmatter_matches(
+                fm, filters
+            )[0]:
+                selected.append(note)
+        return selected
+
+    @staticmethod
+    def _delta_status(delta: dict) -> str:
+        if delta.get("error") == "missing_org_id":
+            return "skipped_no_org_id"
+        if all(item.get("missing") for item in delta["windows"].values()):
+            return "missing_snapshots"
+        return "available"
+
+    @staticmethod
+    def _rollup_record(note: Any, delta: dict, redact: bool) -> dict:
+        fm = note.frontmatter
+        common = {
+            "org_id": delta.get("org_id"),
+            "date": str(fm.get("date") or ""),
+            "engagement_type": fm.get("engagement_type"),
+            "why_called": fm.get("why_called"),
+            "delta_status": VaultIntelligenceTools._delta_status(delta),
+        }
+        if redact:
+            return {
+                **common,
+                "windows": _redact_windows(delta.get("windows", {})),
+                "deltas": _redact_metric_data(delta.get("deltas", {})),
+            }
+        details = {
+            "engagement_path": note.path,
+            "owning_ve": fm.get("owning_ve"),
+            "customer": fm.get("customer"),
+            "partner": fm.get("partner"),
+            "arr_at_intake": fm.get("arr_at_intake"),
+            "qualification_amount": fm.get("qualification_amount"),
+            "outcome_amount": fm.get("outcome_amount"),
+            "outcome_corroborated": fm.get("outcome_corroborated"),
+            "followup_1": fm.get("followup_1"),
+            "followup_2": fm.get("followup_2"),
+            "followup_3": fm.get("followup_3"),
+            "status": fm.get("status"),
+            "windows": delta.get("windows", {}),
+            "deltas": delta.get("deltas", {}),
+        }
+        return {**common, **details}
+
+    @staticmethod
+    def _contributed_pipeline(notes: List[Any]) -> float:
+        return sum(
+            float(note.frontmatter["outcome_amount"])
+            for note in notes
+            if note.frontmatter.get("outcome_corroborated") is True
+            and _is_number(note.frontmatter.get("outcome_amount"))
+        )
+
+    async def impact_rollup(
+        self,
+        from_date: str,
+        to_date: str,
+        filters: Optional[dict] = None,
+        redact: bool = False,
+        scope: str = "work",
+    ) -> Dict[str, Any]:
+        start, finish, active_filters = self._validate_rollup_input(
+            from_date, to_date, filters, scope
+        )
+        notes = await self._all_notes("work", folder="12_engagements")
+        matched_notes = self._select_rollup_notes(
+            notes, start, finish, active_filters
+        )
+        records: List[dict] = []
+        for note in matched_notes:
+            delta_result = await self.engagement_delta(note.path, scope="work")
+            records.append(
+                self._rollup_record(note, delta_result["metadata"], redact)
+            )
+        pipeline = self._contributed_pipeline(matched_notes)
+        pending = self._future_followup_count(matched_notes)
+        headline = (
+            f"{len(matched_notes)} engagements, {_format_currency(pipeline)} "
+            f"contributed pipeline, {pending} pending follow-up"
+        )
+        payload = {
+            "from": start.isoformat(),
+            "to": finish.isoformat(),
+            "filters": (
+                {
+                    key: value
+                    for key, value in active_filters.items()
+                    if key in {"why_called", "engagement_type"}
+                }
+                if redact
+                else active_filters
+            ),
+            "redacted": bool(redact),
+            "engagement_count": len(matched_notes),
+            "contributed_pipeline": pipeline,
+            "pending_follow_up": pending,
+            "headline": headline,
+            "metric_deltas": self._aggregate_deltas(records),
+            "records": records,
+        }
         return _json_result(payload)
 
     async def get_dossier(
