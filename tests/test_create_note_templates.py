@@ -169,6 +169,24 @@ class TestEngagementTemplateRouting(unittest.TestCase):
             ),
             "work/00_system/templates/ve-engagement.md",
         )
+        self.assertEqual(
+            template_detector.get_template_path_for_folder(
+                "12_engagements/x.md", "work", engagement_type="delivery"
+            ),
+            "work/00_system/templates/delivery-engagement.md",
+        )
+        self.assertEqual(
+            template_detector.get_template_path_for_folder(
+                "12_engagements/x.md", "work", engagement_type="enablement"
+            ),
+            "work/00_system/templates/enablement-engagement.md",
+        )
+
+    def test_impact_engagement_types_in_vocabulary(self) -> None:
+        from src.vault_intelligence.parser import ENGAGEMENT_TYPES
+
+        self.assertIn("delivery", ENGAGEMENT_TYPES)
+        self.assertIn("enablement", ENGAGEMENT_TYPES)
 
     def test_build_engagement_note_from_data_bwm_fields(self) -> None:
         from src.utils.template_utils import build_engagement_note_from_data

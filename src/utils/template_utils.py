@@ -45,6 +45,8 @@ class TemplateDetector:
             "build-with-me": "00_system/templates/build-with-me-engagement.md",
             "technical-deep-dive": "00_system/templates/technical-deep-dive.md",
             "ve-assist": "00_system/templates/ve-assist.md",
+            "delivery": "00_system/templates/delivery-engagement.md",
+            "enablement": "00_system/templates/enablement-engagement.md",
         }
 
         # Folder aliases - map alternative folder names to canonical names

@@ -181,6 +181,8 @@ The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 - **Engagements** (detail) live at `12_engagements/YYYY-MM-DD_kebab.md` (`type: engagement`). Prefer **`create_engagement`**.
   - `build-with-me` = parent **adoption program** for a ~1-month enterprise trial (trial window, planned touchpoints, scorecard).
   - `technical-deep-dive` = specialist architecture / advanced use-case pull-in from another VE.
+  - `delivery` = owned build-and-ship work (`hours_invested`, `price_charged`, `shipped_date`, `handover_artifact`).
+  - `enablement` = coaching a VE to self-serve a topic (`target_ve`, `topic`, `graduated`, `hours_returned_est`).
   - Other types (`hackathon`, `workshop`, `demo`, `partner-review`, `consulting`, `ve-assist`) are usually atomic sessions.
 - **Events** (graph nodes) live at `entities/event/{YYYY-MM-DD}-{slug}-{event_type}.md`. Prefer **`create_event`**.
 - Child interactions link to parents via `parent_engagement` + `source_note`. Parent notes get an idempotent **`## Interactions`** roll-up.

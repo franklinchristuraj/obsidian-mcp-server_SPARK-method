@@ -52,6 +52,8 @@ ENGAGEMENT_TYPES = frozenset(
         "demo",
         "ve-assist",
         "technical-deep-dive",
+        "delivery",
+        "enablement",
     }
 )
 ENGAGEMENT_STATUSES = frozenset(
