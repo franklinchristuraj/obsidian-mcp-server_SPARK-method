@@ -137,11 +137,20 @@ class ParsedNote:
 
 
 def normalize_link_target(target: str) -> str:
-    """Normalize wikilink target for lenient matching."""
-    t = target.strip().replace("\\", "/")
+    """Normalize wikilink target for lenient matching.
+
+    Three Obsidian-legal forms have to come off before a path lookup can
+    succeed: the trailing backslash left behind by ``[[path\\|alias]]`` (the
+    escape an aliased link needs to survive a markdown table), a
+    ``#heading`` / ``#^block`` reference, and a trailing slash. Remaining
+    backslashes are treated as Windows path separators.
+    """
+    t = target.strip().rstrip("\\")
+    t = t.split("#", 1)[0].strip()
+    t = t.replace("\\", "/")
     while t.startswith("./"):
         t = t[2:]
-    return t
+    return t.rstrip("/")
 
 
 def normalize_path_key(path: str) -> str:
@@ -173,6 +182,16 @@ def _parse_frontmatter_fast(raw_fm: str) -> dict:
     if aliases_match:
         inner = aliases_match.group(1)
         fm["aliases"] = [a.strip().strip("'\"") for a in inner.split(",") if a.strip()]
+    else:
+        aliases_block = re.search(
+            r"^aliases:[ \t]*\n((?:[ \t]+-[ \t]+.+\n?)+)", raw_fm, re.MULTILINE
+        )
+        if aliases_block:
+            fm["aliases"] = [
+                line.split("-", 1)[1].strip().strip("'\"")
+                for line in aliases_block.group(1).splitlines()
+                if line.strip().startswith("-")
+            ]
     tags_match = re.search(r"^tags:\s*\n((?:\s+-\s+.+\n?)+)", raw_fm, re.MULTILINE)
     if tags_match:
         fm["tags"] = [

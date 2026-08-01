@@ -47,6 +47,73 @@ class TestParseNote(unittest.TestCase):
         self.assertRegex(history[0]["date"], r"^\d{4}-\d{2}-\d{2}$")
 
 
+class TestNormalizeLinkTarget(unittest.TestCase):
+    def test_escaped_pipe_from_markdown_table_link(self) -> None:
+        from src.vault_intelligence.parser import (
+            WIKILINK_RE,
+            normalize_link_target,
+        )
+
+        cell = r"| Action | [[entities/company/make-company\|Make]] |"
+        target = WIKILINK_RE.search(cell).group(1)
+        self.assertEqual(
+            normalize_link_target(target), "entities/company/make-company"
+        )
+
+    def test_heading_and_block_references_are_stripped(self) -> None:
+        from src.vault_intelligence.parser import normalize_link_target
+
+        self.assertEqual(
+            normalize_link_target("99_archive/poc.md#Open Questions"),
+            "99_archive/poc.md",
+        )
+        self.assertEqual(normalize_link_target("poc.md#^abc123"), "poc.md")
+        self.assertEqual(normalize_link_target("#Same Note Heading"), "")
+
+    def test_windows_separators_and_relative_prefix_still_normalize(self) -> None:
+        from src.vault_intelligence.parser import normalize_link_target
+
+        self.assertEqual(
+            normalize_link_target(r"./entities\customer\gojob.md"),
+            "entities/customer/gojob.md",
+        )
+
+
+class TestFastFrontmatterAliases(unittest.TestCase):
+    """Corpus scans parse frontmatter with a regex instead of yaml; both YAML
+    list styles have to yield the same aliases or bare wikilinks silently stop
+    resolving to block-style notes."""
+
+    def _parse(self, body: str) -> object:
+        from src.vault_intelligence.parser import parse_note
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "note.md"
+            path.write_text(body, encoding="utf-8")
+            return parse_note(path, "work", "note.md", include_sections=False)
+
+    def test_block_style_alias_list(self) -> None:
+        note = self._parse(
+            "---\n"
+            "aliases:\n"
+            "  - POC Signal Log\n"
+            "  - Signal Log\n"
+            "type: resource\n"
+            "---\n\nbody\n"
+        )
+        self.assertEqual(note.aliases, ["poc signal log", "signal log"])
+
+    def test_inline_style_alias_list_unchanged(self) -> None:
+        note = self._parse(
+            "---\naliases: [Din, Den, Din Dedaqi]\ntype: entity\n---\n\nbody\n"
+        )
+        self.assertEqual(note.aliases, ["din", "den", "din dedaqi"])
+
+    def test_empty_alias_list_yields_no_aliases(self) -> None:
+        note = self._parse("---\naliases: []\ntype: entity\n---\n\nbody\n")
+        self.assertEqual(note.aliases, [])
+
+
 class TestVaultIntelligenceTools(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         from src.vault_intelligence.tools import VaultIntelligenceTools
