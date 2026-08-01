@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -78,6 +78,14 @@ _REDACTED_METRIC_KEY_RE = re.compile(
     r"(?:^|_)(?:arr|customer|partner|person|name|email|revenue|price|amount)(?:_|$)",
     re.IGNORECASE,
 )
+_TOTAL_VE_POOL = 8
+_STREAM_LABELS = {
+    "escalation": "Escalated to me",
+    "owned-delivery": "Delivered end to end",
+    "enablement": "Capability handoff",
+    "partner": "Partner",
+}
+_WIKILINK_RE = re.compile(r"^\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]$")
 
 
 def _json_result(payload: Any) -> Dict[str, Any]:
@@ -182,6 +190,100 @@ def _format_currency(value: float) -> str:
         amount = f"{value / 1_000:.1f}".rstrip("0").rstrip(".")
         return f"${amount}K"
     return f"${value:,.0f}"
+
+
+def _format_eur(value: float) -> str:
+    if value >= 1_000_000:
+        amount = f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"EUR {amount}M"
+    if value >= 1_000:
+        amount = f"{value / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"EUR {amount}K"
+    return f"EUR {value:,.0f}"
+
+
+def _nullable_number(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _nullable_bool(value: Any) -> Optional[bool]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _display_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = _WIKILINK_RE.match(text)
+    if match:
+        target = match.group(1).strip()
+        leaf = target.split("/")[-1]
+        if leaf.endswith(".md"):
+            leaf = leaf[:-3]
+        return leaf.replace("-", " ").strip() or None
+    return text
+
+
+def _metric_label(key: str) -> str:
+    return key.replace("_", " ").replace("-", " ").strip().capitalize()
+
+
+def _pct_to_fraction(pct: Any) -> Optional[float]:
+    if not _is_number(pct):
+        return None
+    return round(float(pct) / 100.0, 4)
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return round((ordered[mid - 1] + ordered[mid]) / 2.0, 4)
+
+
+def _stream_for_engagement_type(engagement_type: Any) -> str:
+    et = str(engagement_type or "").strip().lower()
+    if et == "delivery":
+        return "owned-delivery"
+    if et == "enablement":
+        return "enablement"
+    if et == "partner-review":
+        return "partner"
+    return "escalation"
+
+
+def _interval_pct_fraction(
+    deltas: Dict[str, List[dict]], from_key: str, to_key: str
+) -> Dict[str, float]:
+    flat: Dict[str, float] = {}
+    for metric, intervals in (deltas or {}).items():
+        for interval in intervals or []:
+            if interval.get("from") != from_key or interval.get("to") != to_key:
+                continue
+            fraction = _pct_to_fraction(interval.get("pct"))
+            if fraction is not None:
+                flat[metric] = fraction
+    return flat
 
 
 def _redact_metric_data(value: Any) -> Any:
@@ -983,48 +1085,6 @@ class VaultIntelligenceTools:
         return count
 
     @staticmethod
-    def _aggregate_deltas(records: List[dict]) -> Dict[str, List[dict]]:
-        buckets: Dict[Tuple[str, str, str], dict] = {}
-        for record in records:
-            for metric, intervals in record.get("deltas", {}).items():
-                for interval in intervals:
-                    if "abs" not in interval:
-                        continue
-                    key = (metric, interval["from"], interval["to"])
-                    bucket = buckets.setdefault(
-                        key,
-                        {
-                            "from": interval["from"],
-                            "to": interval["to"],
-                            "from_total": 0,
-                            "to_total": 0,
-                            "contributing_engagements": 0,
-                            "modes": set(),
-                        },
-                    )
-                    bucket["from_total"] += interval["from_value"]
-                    bucket["to_total"] += interval["to_value"]
-                    bucket["contributing_engagements"] += 1
-                    bucket["modes"].update(
-                        (interval["from_mode"], interval["to_mode"])
-                    )
-        aggregated: Dict[str, List[dict]] = {}
-        for (metric, _from_key, _to_key), bucket in sorted(buckets.items()):
-            absolute = bucket["to_total"] - bucket["from_total"]
-            item = {
-                **bucket,
-                "abs": absolute,
-                "pct": (
-                    round((absolute / bucket["from_total"]) * 100, 2)
-                    if bucket["from_total"] != 0
-                    else None
-                ),
-                "modes": sorted(bucket["modes"]),
-            }
-            aggregated.setdefault(metric, []).append(item)
-        return aggregated
-
-    @staticmethod
     def _validate_rollup_input(
         from_date: str, to_date: str, filters: Optional[dict], scope: str
     ) -> Tuple[date, date, dict]:
@@ -1061,55 +1121,331 @@ class VaultIntelligenceTools:
         return selected
 
     @staticmethod
-    def _delta_status(delta: dict) -> str:
+    def _contract_delta_status(
+        fm: dict, delta: dict, has_30: bool, has_90: bool
+    ) -> str:
         if delta.get("error") == "missing_org_id":
             return "skipped_no_org_id"
-        if all(item.get("missing") for item in delta["windows"].values()):
-            return "missing_snapshots"
-        return "available"
+        qualification = str(fm.get("qualification") or "").strip().lower()
+        if qualification == "below-gate":
+            return "excluded_below_gate"
+        if has_90:
+            return "complete_90"
+        if has_30:
+            return "complete_30"
+        return "partial"
+
+    @staticmethod
+    def _snapshot_mode_for_record(delta: dict) -> Optional[str]:
+        windows = delta.get("windows") or {}
+        for key in ("0", "+30", "+90", "-30"):
+            window = windows.get(key) or {}
+            if window.get("missing"):
+                continue
+            mode = window.get("mode")
+            if mode in SNAPSHOT_MODE:
+                return str(mode)
+        return None
 
     @staticmethod
     def _rollup_record(note: Any, delta: dict, redact: bool) -> dict:
         fm = note.frontmatter
-        common = {
-            "org_id": delta.get("org_id"),
-            "date": str(fm.get("date") or ""),
-            "engagement_type": fm.get("engagement_type"),
-            "why_called": fm.get("why_called"),
-            "delta_status": VaultIntelligenceTools._delta_status(delta),
+        engagement_type = fm.get("engagement_type")
+        stream = _stream_for_engagement_type(engagement_type)
+        raw_deltas = delta.get("deltas") or {}
+        flat_30 = _interval_pct_fraction(raw_deltas, "0", "+30")
+        flat_90 = _interval_pct_fraction(raw_deltas, "0", "+90")
+        has_30 = bool(flat_30)
+        has_90 = bool(flat_90)
+        delta_status = VaultIntelligenceTools._contract_delta_status(
+            fm, delta, has_30, has_90
+        )
+
+        try:
+            engagement_date = _parse_iso_date(fm.get("date"), field="engagement date")
+            windows = {
+                "d30": (engagement_date + timedelta(days=30)).isoformat(),
+                "d90": (engagement_date + timedelta(days=90)).isoformat(),
+            }
+            date_value = engagement_date.isoformat()
+        except ValueError:
+            windows = {"d30": None, "d90": None}
+            date_value = str(fm.get("date") or "") or None
+
+        status_raw = str(fm.get("status") or "").strip().lower()
+        status = status_raw if status_raw in {"live", "closed"} else (
+            "closed" if status_raw else None
+        )
+
+        why_called = str(fm.get("why_called") or "").strip() or "unclassified"
+        owning_ve = None if stream == "owned-delivery" else _display_name(
+            fm.get("owning_ve")
+        )
+        customer = _display_name(fm.get("customer"))
+        org_id = delta.get("org_id")
+        if not org_id:
+            org_id = None
+
+        record = {
+            "org_id": org_id,
+            "date": date_value,
+            "customer": customer,
+            "engagement_type": engagement_type or None,
+            "stream": stream,
+            "why_called": why_called,
+            "owning_ve": owning_ve,
+            "status": status,
+            "delta_status": delta_status,
+            "snapshot_mode": VaultIntelligenceTools._snapshot_mode_for_record(delta),
+            "arr_at_intake": _nullable_number(fm.get("arr_at_intake")),
+            "qualification_amount": _nullable_number(fm.get("qualification_amount")),
+            "outcome_amount": _nullable_number(fm.get("outcome_amount")),
+            "outcome_corroborated": _nullable_bool(fm.get("outcome_corroborated")),
+            "corroborated_by": _display_name(fm.get("corroborator")),
+            "corroborated_on": None,
+            "windows": windows,
+            "deltas": flat_30,
         }
+
         if redact:
             return {
-                **common,
-                "windows": _redact_windows(delta.get("windows", {})),
-                "deltas": _redact_metric_data(delta.get("deltas", {})),
+                "org_id": org_id,
+                "date": date_value,
+                "customer": None,
+                "engagement_type": engagement_type or None,
+                "stream": stream,
+                "why_called": why_called,
+                "owning_ve": None,
+                "status": status,
+                "delta_status": delta_status,
+                "snapshot_mode": record["snapshot_mode"],
+                "arr_at_intake": None,
+                "qualification_amount": None,
+                "outcome_amount": None,
+                "outcome_corroborated": record["outcome_corroborated"],
+                "corroborated_by": None,
+                "corroborated_on": None,
+                "windows": windows,
+                "deltas": flat_30,
             }
-        details = {
+
+        return {
+            **record,
             "engagement_path": note.path,
-            "owning_ve": fm.get("owning_ve"),
-            "customer": fm.get("customer"),
-            "partner": fm.get("partner"),
-            "arr_at_intake": fm.get("arr_at_intake"),
-            "qualification_amount": fm.get("qualification_amount"),
-            "outcome_amount": fm.get("outcome_amount"),
-            "outcome_corroborated": fm.get("outcome_corroborated"),
-            "followup_1": fm.get("followup_1"),
-            "followup_2": fm.get("followup_2"),
-            "followup_3": fm.get("followup_3"),
-            "status": fm.get("status"),
-            "windows": delta.get("windows", {}),
-            "deltas": delta.get("deltas", {}),
+            "partner": _display_name(fm.get("partner")),
+            "deltas_90": flat_90,
         }
-        return {**common, **details}
 
     @staticmethod
-    def _contributed_pipeline(notes: List[Any]) -> float:
-        return sum(
-            float(note.frontmatter["outcome_amount"])
-            for note in notes
-            if note.frontmatter.get("outcome_corroborated") is True
-            and _is_number(note.frontmatter.get("outcome_amount"))
+    def _build_metric_delta_medians(records: List[dict]) -> Dict[str, dict]:
+        buckets_30: Dict[str, List[float]] = {}
+        buckets_90: Dict[str, List[float]] = {}
+        for record in records:
+            for metric, value in (record.get("deltas") or {}).items():
+                if _is_number(value):
+                    buckets_30.setdefault(metric, []).append(float(value))
+            for metric, value in (record.get("deltas_90") or {}).items():
+                if _is_number(value):
+                    buckets_90.setdefault(metric, []).append(float(value))
+        metrics = sorted(set(buckets_30) | set(buckets_90))
+        result: Dict[str, dict] = {}
+        for metric in metrics:
+            values_30 = buckets_30.get(metric, [])
+            values_90 = buckets_90.get(metric, [])
+            result[metric] = {
+                "label": _metric_label(metric),
+                "median_pct_30": _median(values_30),
+                "n_30": len(values_30),
+                "median_pct_90": _median(values_90),
+                "n_90": len(values_90),
+            }
+        return result
+
+    @staticmethod
+    def _build_streams(records: List[dict]) -> Dict[str, dict]:
+        counts = {key: 0 for key in _STREAM_LABELS}
+        for record in records:
+            stream = record.get("stream") or "escalation"
+            if stream not in counts:
+                counts[stream] = 0
+            counts[stream] += 1
+        return {
+            key: {
+                "count": counts.get(key, 0),
+                "label": _STREAM_LABELS.get(key, _metric_label(key)),
+            }
+            for key in list(_STREAM_LABELS.keys())
+            + [k for k in counts if k not in _STREAM_LABELS]
+        }
+
+    @staticmethod
+    def _build_why_called(records: List[dict]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for record in records:
+            key = str(record.get("why_called") or "unclassified").strip() or "unclassified"
+            counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    @staticmethod
+    def _build_coverage(records: List[dict], start: date, finish: date) -> dict:
+        escalation = [r for r in records if r.get("stream") == "escalation"]
+        ves = {
+            str(r.get("owning_ve")).strip()
+            for r in escalation
+            if r.get("owning_ve")
+        }
+        by_period: List[dict] = []
+        cursor = date(start.year, start.month, 1)
+        end_month = date(finish.year, finish.month, 1)
+        while cursor <= end_month:
+            period = f"{cursor.year:04d}-{cursor.month:02d}"
+            month_records = [
+                r
+                for r in escalation
+                if isinstance(r.get("date"), str) and r["date"].startswith(period)
+            ]
+            month_ves = {
+                str(r.get("owning_ve")).strip()
+                for r in month_records
+                if r.get("owning_ve")
+            }
+            by_period.append(
+                {
+                    "period": period,
+                    "distinct_ves": len(month_ves),
+                    "engagements": len(month_records),
+                }
+            )
+            if cursor.month == 12:
+                cursor = date(cursor.year + 1, 1, 1)
+            else:
+                cursor = date(cursor.year, cursor.month + 1, 1)
+        return {
+            "distinct_ves": len(ves),
+            "total_ve_pool": _TOTAL_VE_POOL,
+            "by_period": by_period,
+        }
+
+    @staticmethod
+    def _build_commercial(records: List[dict]) -> dict:
+        corroborated = 0.0
+        uncorroborated = 0.0
+        with_outcome = 0
+        qualified = 0
+        for record in records:
+            amount = record.get("outcome_amount")
+            if _is_number(amount):
+                with_outcome += 1
+                if record.get("outcome_corroborated") is True:
+                    corroborated += float(amount)
+                else:
+                    uncorroborated += float(amount)
+            if _is_number(record.get("qualification_amount")):
+                qualified += 1
+        return {
+            "currency": "EUR",
+            "corroborated_eur": corroborated,
+            "uncorroborated_eur": uncorroborated,
+            "records_with_outcome": with_outcome,
+            "records_qualified": qualified,
+        }
+
+    @staticmethod
+    def _build_provenance(records: List[dict]) -> dict:
+        modes: Dict[str, int] = {}
+        with_org = 0
+        complete_30 = 0
+        complete_90 = 0
+        partial = 0
+        skipped = 0
+        excluded = 0
+        for record in records:
+            if record.get("org_id"):
+                with_org += 1
+            status = record.get("delta_status")
+            if status == "complete_90":
+                complete_90 += 1
+                complete_30 += 1
+            elif status == "complete_30":
+                complete_30 += 1
+            elif status == "partial":
+                partial += 1
+            elif status == "skipped_no_org_id":
+                skipped += 1
+            elif status == "excluded_below_gate":
+                excluded += 1
+            mode = record.get("snapshot_mode")
+            if mode:
+                modes[mode] = modes.get(mode, 0) + 1
+        return {
+            "records_total": len(records),
+            "with_org_id": with_org,
+            "delta_complete_30": complete_30,
+            "delta_complete_90": complete_90,
+            "delta_partial": partial,
+            "skipped_no_org_id": skipped,
+            "excluded_below_gate": excluded,
+            "snapshot_modes": modes,
+        }
+
+    @staticmethod
+    def _build_headline(
+        records: List[dict],
+        coverage: dict,
+        metric_deltas: Dict[str, dict],
+        commercial: dict,
+        start: date,
+    ) -> dict:
+        escalation_count = sum(1 for r in records if r.get("stream") == "escalation")
+        distinct = coverage.get("distinct_ves", 0)
+        pool = coverage.get("total_ve_pool", _TOTAL_VE_POOL)
+        month_name = start.strftime("%B")
+
+        primary_metric = None
+        for item in metric_deltas.values():
+            if item.get("median_pct_30") is not None and item.get("n_30", 0) > 0:
+                if primary_metric is None or item["n_30"] > primary_metric["n_30"]:
+                    primary_metric = item
+
+        measurable_n = sum(1 for r in records if r.get("deltas"))
+        measurable_den = sum(
+            1
+            for r in records
+            if r.get("delta_status")
+            not in {"skipped_no_org_id", "excluded_below_gate"}
         )
+        parts = [
+            f"{escalation_count} escalation"
+            f"{'' if escalation_count == 1 else 's'} from {distinct} of {pool} VEs "
+            f"since {month_name}."
+        ]
+        if primary_metric and primary_metric.get("median_pct_30") is not None:
+            pct = round(primary_metric["median_pct_30"] * 100)
+            parts.append(
+                f" Where measurable, adoption moved a median {pct}% within 30 days "
+                f"(n = {primary_metric['n_30']})."
+            )
+        else:
+            parts.append(" Where measurable, adoption deltas are not yet available.")
+
+        if commercial.get("corroborated_eur"):
+            parts.append(
+                f" Corroborated outcomes total "
+                f"{_format_eur(commercial['corroborated_eur'])}."
+            )
+
+        if measurable_n == 0:
+            confidence = "none"
+        elif measurable_den > 0 and measurable_n >= max(1, measurable_den // 2):
+            confidence = "strong"
+        else:
+            confidence = "partial"
+
+        return {
+            "text": "".join(parts).strip(),
+            "measurable": measurable_n > 0,
+            "confidence": confidence,
+        }
 
     async def impact_rollup(
         self,
@@ -1130,15 +1466,41 @@ class VaultIntelligenceTools:
         for note in matched_notes:
             delta_result = await self.engagement_delta(note.path, scope="work")
             records.append(
-                self._rollup_record(note, delta_result["metadata"], redact)
+                self._rollup_record(note, delta_result["metadata"], redact=False)
             )
-        pipeline = self._contributed_pipeline(matched_notes)
-        pending = self._future_followup_count(matched_notes)
-        headline = (
-            f"{len(matched_notes)} engagements, {_format_currency(pipeline)} "
-            f"contributed pipeline, {pending} pending follow-up"
+
+        coverage = self._build_coverage(records, start, finish)
+        metric_deltas = self._build_metric_delta_medians(records)
+        commercial = self._build_commercial(records)
+        provenance = self._build_provenance(records)
+        streams = self._build_streams(records)
+        why_called = self._build_why_called(records)
+        headline = self._build_headline(
+            records, coverage, metric_deltas, commercial, start
         )
+        pending = self._future_followup_count(matched_notes)
+
+        public_records = []
+        for record in records:
+            public = dict(record)
+            public.pop("deltas_90", None)
+            public.pop("engagement_path", None)
+            public.pop("partner", None)
+            if redact:
+                public["customer"] = None
+                public["owning_ve"] = None
+                public["arr_at_intake"] = None
+                public["qualification_amount"] = None
+                public["outcome_amount"] = None
+                public["corroborated_by"] = None
+            public_records.append(public)
+
         payload = {
+            "contract_version": 1,
+            "generated_at": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "from": start.isoformat(),
             "to": finish.isoformat(),
             "filters": (
@@ -1152,11 +1514,15 @@ class VaultIntelligenceTools:
             ),
             "redacted": bool(redact),
             "engagement_count": len(matched_notes),
-            "contributed_pipeline": pipeline,
+            "streams": streams,
+            "coverage": coverage,
+            "why_called": why_called,
+            "metric_deltas": metric_deltas,
+            "commercial": commercial,
+            "provenance": provenance,
             "pending_follow_up": pending,
             "headline": headline,
-            "metric_deltas": self._aggregate_deltas(records),
-            "records": records,
+            "records": public_records,
         }
         return _json_result(payload)
 

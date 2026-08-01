@@ -184,6 +184,8 @@ class TestImpactTools(unittest.IsolatedAsyncioTestCase):
             arr=600000,
             notes="Acme expanded",
         )
+        # +30 window snapshot so median deltas populate
+        await self._capture("2026-03-03", 20)
         result = await self.tools.impact_rollup(
             from_date="2026-01-01",
             to_date="2026-02-28",
@@ -193,15 +195,53 @@ class TestImpactTools(unittest.IsolatedAsyncioTestCase):
         data = result["metadata"]
         serialized_record = json.dumps(data["records"][0]).lower()
 
+        self.assertEqual(data["contract_version"], 1)
         self.assertEqual(data["engagement_count"], 1)
-        self.assertEqual(data["contributed_pipeline"], 186000)
+        self.assertEqual(data["commercial"]["corroborated_eur"], 186000)
         self.assertEqual(data["pending_follow_up"], 1)
-        self.assertIn("$186K contributed pipeline", data["headline"])
+        self.assertIsInstance(data["headline"], dict)
+        self.assertIn("text", data["headline"])
+        self.assertIn("confidence", data["headline"])
+        self.assertIn("streams", data)
+        self.assertIn("coverage", data)
+        self.assertIn("provenance", data)
+        self.assertEqual(data["records"][0]["stream"], "escalation")
+        self.assertEqual(data["records"][0]["customer"], None)
         self.assertNotIn("acme", serialized_record)
-        self.assertNotIn("customer", serialized_record)
-        self.assertNotIn('"arr"', serialized_record)
         self.assertNotIn("engagement_path", data["records"][0])
         self.assertNotIn("owning_ve", data["filters"])
+        self.assertIn("scenarios", data["metric_deltas"])
+        self.assertEqual(data["metric_deltas"]["scenarios"]["n_30"], 1)
+        self.assertIsNotNone(data["metric_deltas"]["scenarios"]["median_pct_30"])
+
+    async def test_rollup_contract_resolves_customer_and_skips_empty_org(self) -> None:
+        note_path = self.root / "work" / "12_engagements" / "missing-org.md"
+        note_path.write_text(
+            "---\n"
+            "type: engagement\n"
+            "date: 2026-02-15\n"
+            "engagement_type: delivery\n"
+            "customer: \"[[entities/customer/northwind.md]]\"\n"
+            "org_id: \"\"\n"
+            "qualification: below-gate\n"
+            "status: closed\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        result = await self.tools.impact_rollup(
+            from_date="2026-01-01",
+            to_date="2026-02-28",
+            scope="work",
+        )
+        data = result["metadata"]
+        by_type = {r["engagement_type"]: r for r in data["records"]}
+        delivery = by_type["delivery"]
+        self.assertEqual(delivery["stream"], "owned-delivery")
+        self.assertEqual(delivery["customer"], "northwind")
+        self.assertIsNone(delivery["owning_ve"])
+        # missing org_id wins over below-gate
+        self.assertEqual(delivery["delta_status"], "skipped_no_org_id")
+        self.assertEqual(data["streams"]["owned-delivery"]["count"], 1)
 
     async def test_missing_org_id_returns_explicit_flag(self) -> None:
         note_path = self.root / "work" / "12_engagements" / "missing-org.md"
