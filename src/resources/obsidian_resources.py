@@ -203,24 +203,35 @@ class ObsidianResources:
         """
         MCP Apps UI bundles (ui://ziksaka/...).
 
-        Empty until a real HTML app ships. Tools will reference these via
-        ``_meta.ui.resourceUri`` with mimeType text/html;profile=mcp-app.
+        Delegates to src.apps.registry so HTML bundles on disk are discoverable.
+        Tools reference these via ``_meta.ui.resourceUri``.
         """
-        return []
+        try:
+            from ..apps.registry import list_ui_app_resources
+
+            return list_ui_app_resources()
+        except Exception as e:
+            print(f"Warning: Could not list UI resources: {e}")
+            return []
 
     def build_ui_uri(self, app_path: str) -> str:
-        """Build ui://ziksaka/{app_path} for future MCP App bundles."""
+        """Build ui://ziksaka/{app_path} for MCP App bundles."""
         encoded = urllib.parse.quote(app_path.strip("/"), safe="/")
         return f"{self.ui_scheme}://{self.ui_authority}/{encoded}"
 
     # =================== Resource Content Reading ===================
 
     async def read_resource(self, uri: str) -> ResourceContent:
-        """Read a resource URI (obsidian://notes/… or future ui://…)."""
+        """Read a resource URI (obsidian://notes/… or ui://ziksaka/…)."""
         if uri.startswith(f"{self.ui_scheme}://"):
-            raise ValueError(
-                f"No MCP App UI registered for {uri}. "
-                "ui:// resources ship when the first app is added."
+            from ..apps.registry import read_ui_app_resource
+
+            data = await asyncio.to_thread(read_ui_app_resource, uri)
+            return ResourceContent(
+                uri=data["uri"],
+                mimeType=data["mimeType"],
+                text=data.get("text"),
+                metadata=data.get("metadata"),
             )
 
         if uri in self.resource_cache:

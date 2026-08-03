@@ -37,6 +37,9 @@ class MCPTool:
     # running a tool. outputSchema, when set, describes structuredContent.
     annotations: Optional[Dict[str, Any]] = None
     outputSchema: Optional[Dict[str, Any]] = None
+    # MCP Apps (SEP-1865): serialized as `_meta` in tools/list. Carries
+    # ui.resourceUri and ui.visibility among other extension fields.
+    meta: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -47,6 +50,8 @@ class MCPResource:
     name: str
     description: Optional[str] = None
     mimeType: Optional[str] = None
+    # MCP Apps: serialized as `_meta` in resources/list (csp, permissions).
+    meta: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -86,6 +91,8 @@ class MCPCapabilities:
     prompts: Dict[str, Any] = None
     logging: Dict[str, Any] = None
     completions: Dict[str, Any] = None
+    # SEP-1724 extension capabilities (e.g. io.modelcontextprotocol/ui).
+    extensions: Dict[str, Any] = None
 
     def __post_init__(self):
         if self.tools is None:
@@ -98,3 +105,5 @@ class MCPCapabilities:
             self.logging = {}
         if self.completions is None:
             self.completions = {}
+        if self.extensions is None:
+            self.extensions = {}

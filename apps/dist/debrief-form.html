@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Debrief Form</title>
+<style>
+:root {
+  --fa-teal: #0E7C86;
+  --fa-teal-40: #6EB0B6;
+  --fa-teal-20: #B7DBDE;
+  --fa-coral: #C24A22;
+  --fa-coral-40: #DD8E74;
+  --fa-coral-20: #EFCBBD;
+  --fa-sand: #FBF8F5;
+  --fa-white: #FFFFFF;
+  --fa-amber: #D98A15;
+  --fa-ink: #04211B;
+  --fa-black: #1C1B19;
+  --fa-stone: #5F5E5A;
+  --fa-font: Inter, "Space Grotesk", system-ui, -apple-system, sans-serif;
+  --fa-radius: 6px;
+  --fa-gap: 12px;
+  --fa-surface: var(--fa-sand);
+  --fa-text: var(--fa-black);
+  --fa-muted: var(--fa-stone);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fa-surface: var(--fa-ink);
+    --fa-text: var(--fa-white);
+    --fa-muted: #9C9A92;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--fa-font);
+  background: var(--fa-surface);
+  color: var(--fa-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.app {
+  padding: 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  max-width: 700px;
+  margin: 0 auto;
+}
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fa-teal);
+  font-weight: 600;
+}
+h1 {
+  margin: 4px 0 6px;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+.muted { color: var(--fa-muted); }
+.amber { color: var(--fa-amber); }
+.coral { color: var(--fa-coral); }
+.panel {
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-teal-20);
+  border-radius: var(--fa-radius);
+  padding: 12px;
+  margin-top: 12px;
+}
+.section-title {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fa-teal);
+  font-weight: 700;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.row { margin: 6px 0; }
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+button {
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--fa-radius);
+  padding: 10px 14px;
+  min-height: 44px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+button.primary {
+  background: var(--fa-coral);
+  color: var(--fa-white);
+  border-color: var(--fa-coral);
+}
+button.primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+button.ghost {
+  background: transparent;
+  color: var(--fa-text);
+  border-color: var(--fa-teal-40);
+}
+.skel {
+  height: 14px;
+  background: var(--fa-teal-20);
+  border-radius: 4px;
+  margin: 8px 0;
+  opacity: 0.5;
+}
+.gap-item::before { content: "⚠ "; color: var(--fa-amber); }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.strike { text-decoration: line-through; color: var(--fa-stone); }
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.dot.fresh { background: var(--fa-teal); }
+.dot.aging { background: var(--fa-amber); }
+.dot.stale { background: var(--fa-amber); }
+.error {
+  border: 1px solid var(--fa-coral);
+  padding: 12px;
+  border-radius: var(--fa-radius);
+  color: var(--fa-text);
+}
+.empty { color: var(--fa-muted); padding: 16px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--fa-teal-20); }
+th { color: var(--fa-teal); font-size: 11px; letter-spacing: 0.06em; }
+.amber-rule { border-left: 3px solid var(--fa-amber); padding-left: 8px; }
+
+
+</style>
+</head>
+<body>
+<div class="app" id="root"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+<script>
+/**
+ * Minimal MCP Apps host bridge (postMessage JSON-RPC).
+ * Compatible enough for Claude hosts; no network, no CDN.
+ */
+(function (global) {
+  function ZiksakaBridge(appName) {
+    this.appName = appName;
+    this._id = 1;
+    this._pending = new Map();
+    this._onResult = null;
+    this._onError = null;
+    this.hostContext = {};
+    var self = this;
+    window.addEventListener("message", function (ev) {
+      self._onMessage(ev);
+    });
+  }
+
+  ZiksakaBridge.prototype.connect = function () {
+    var self = this;
+    return this._request("ui/initialize", {
+      appInfo: { name: this.appName, version: "1.0.0" },
+      appCapabilities: {
+        availableDisplayModes: ["inline", "fullscreen"],
+      },
+    }).then(function (result) {
+      self.hostContext = (result && result.hostContext) || {};
+      return result;
+    });
+  };
+
+  ZiksakaBridge.prototype.onToolResult = function (fn) {
+    this._onResult = fn;
+  };
+
+  ZiksakaBridge.prototype.onToolError = function (fn) {
+    this._onError = fn;
+  };
+
+  ZiksakaBridge.prototype.callServerTool = function (name, args) {
+    return this._request("tools/call", {
+      name: name,
+      arguments: args || {},
+    });
+  };
+
+  ZiksakaBridge.prototype.sendFollowup = function (message) {
+    return this._request("ui/message", { role: "user", content: message }).catch(
+      function () {
+        return self._request("ui/open-link", { url: "#" }).catch(function () {
+          return null;
+        });
+      }
+    );
+  };
+
+  ZiksakaBridge.prototype.requestFullscreen = function () {
+    return this._request("ui/request-display-mode", { mode: "fullscreen" }).catch(
+      function () {
+        return null;
+      }
+    );
+  };
+
+  ZiksakaBridge.prototype._request = function (method, params) {
+    var id = this._id++;
+    var self = this;
+    return new Promise(function (resolve, reject) {
+      self._pending.set(id, { resolve: resolve, reject: reject });
+      var msg = { jsonrpc: "2.0", id: id, method: method, params: params || {} };
+      (window.parent || window).postMessage(msg, "*");
+      setTimeout(function () {
+        if (self._pending.has(id)) {
+          self._pending.delete(id);
+          reject(new Error("timeout waiting for host: " + method));
+        }
+      }, 15000);
+    });
+  };
+
+  ZiksakaBridge.prototype._onMessage = function (ev) {
+    var data = ev.data;
+    if (!data || data.jsonrpc !== "2.0") return;
+    if (data.id != null && this._pending.has(data.id)) {
+      var p = this._pending.get(data.id);
+      this._pending.delete(data.id);
+      if (data.error) p.reject(new Error(data.error.message || "host error"));
+      else p.resolve(data.result);
+      return;
+    }
+    if (data.method === "ui/notifications/tool-result" || data.method === "tool-result") {
+      var result = (data.params && (data.params.structuredContent || data.params.result)) || data.params;
+      if (this._onResult) this._onResult(result, data.params);
+    }
+    if (data.method === "ui/notifications/tool-input" && data.params) {
+      // Host may stream input; ignore for now
+    }
+  };
+
+  /** Extract structured payload from a tools/call result. */
+  ZiksakaBridge.structured = function (result) {
+    if (!result) return null;
+    if (result.structuredContent) return result.structuredContent;
+    if (result.metadata) return result.metadata;
+    if (result.content && result.content[0] && result.content[0].text) {
+      try {
+        return JSON.parse(result.content[0].text);
+      } catch (e) {
+        return { text: result.content[0].text };
+      }
+    }
+    return result;
+  };
+
+  global.ZiksakaBridge = ZiksakaBridge;
+})(window);
+
+</script>
+<script>
+
+const root = document.getElementById("root");
+const bridge = new ZiksakaBridge("debrief-form");
+let formState = null;
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c])); }
+
+function renderForm(data) {
+  formState = data;
+  const v = data.vocab || {};
+  const cust = data.customer || {};
+  let html = `<div class="eyebrow">WORK · DEBRIEF</div><h1>Debrief form</h1>
+    <div class="panel">
+      <label>Date <input id="f-date" value="${esc(data.date||"")}"/></label><br/><br/>
+      <label>Customer <input id="f-customer" value="${esc(cust.query||"")}"/>
+        <span class="muted">${cust.resolved ? "resolved" : "unresolved"}</span></label><br/><br/>
+      <label>Attendees <input id="f-attendees" placeholder="comma-separated"/></label><br/><br/>
+      <div>Event type</div>
+      <div id="f-event" style="display:flex;flex-wrap:wrap;gap:6px">
+        ${(v.event_types||[]).map(t => `<button type="button" class="ghost evt" data-v="${esc(t)}">${esc(t)}</button>`).join("")}
+      </div><br/>
+      <label>What happened<textarea id="f-what" rows="3" style="width:100%"></textarea></label><br/>
+      <label>Decisions<textarea id="f-dec" rows="2" style="width:100%"></textarea></label><br/>
+      <label>Open questions<textarea id="f-oq" rows="2" style="width:100%"></textarea></label><br/>
+      <label>org_id <input id="f-org" value="${esc(cust.org_id||"")}"/></label>
+      ${!cust.org_id ? `<p class="amber">without org_id, impact tools cannot measure this engagement later</p>` : ""}
+      <label><input type="checkbox" id="f-eng"/> create engagement record</label><br/>
+      <label><input type="checkbox" id="f-ents" checked/> create missing entity cards (on by default — prevents Claroty failure)</label>
+    </div>`;
+  const gaps = data.entity_gaps || [];
+  if (gaps.length) {
+    html += `<div class="panel"><div class="section-title">Will create</div>
+      ${gaps.map(g => `<div class="row">+ entities/${esc(g.entity_type)}/${esc((g.name||"").toLowerCase().replace(/\s+/g,"-"))}.md ${g.employer?`(employer: ${esc(g.employer)})`:""}</div>`).join("")}
+    </div>`;
+  }
+  html += `<div class="actions"><button class="primary" id="btn-preview">Preview writes</button></div><div id="stage2"></div>`;
+  root.innerHTML = html;
+  let eventType = (v.event_types||[])[0] || "other";
+  root.querySelectorAll(".evt").forEach(b => b.onclick = () => { eventType = b.dataset.v; root.querySelectorAll(".evt").forEach(x => x.classList.toggle("primary", x===b)); b.classList.add("primary"); });
+  document.getElementById("btn-preview").onclick = async () => {
+    const payload = {
+      date: document.getElementById("f-date").value,
+      customer: { query: document.getElementById("f-customer").value, org_id: document.getElementById("f-org").value || null },
+      attendees: document.getElementById("f-attendees").value.split(",").map(s=>s.trim()).filter(Boolean),
+      event_type: eventType,
+      what_happened: document.getElementById("f-what").value,
+      decisions: document.getElementById("f-dec").value,
+      open_questions: document.getElementById("f-oq").value,
+      create_engagement: document.getElementById("f-eng").checked,
+      create_missing_entities: document.getElementById("f-ents").checked,
+      create_event: true,
+      entity_gaps: data.entity_gaps || [],
+    };
+    try {
+      const prev = ZiksakaBridge.structured(await bridge.callServerTool("debrief_preview", { payload, scope: "work" }));
+      const writes = prev.writes || [];
+      document.getElementById("stage2").innerHTML = `<div class="panel"><div class="section-title">${writes.length} writes planned</div>
+        ${writes.map(w => `<div class="mono row">${esc(w.op)} ${esc(w.path)}</div>`).join("")}
+        ${(prev.backlinks||[]).map(b => `<div class="muted">backlinks: ${esc(b)}</div>`).join("")}
+        </div>
+        <div class="actions">
+          <button class="ghost" id="btn-back">Back</button>
+          <button class="primary" id="btn-confirm">Confirm and write</button>
+        </div>`;
+      document.getElementById("btn-back").onclick = () => renderForm(data);
+      document.getElementById("btn-confirm").onclick = async () => {
+        const key = btoa(unescape(encodeURIComponent(JSON.stringify(payload)))).slice(0, 64);
+        try {
+          const res = ZiksakaBridge.structured(await bridge.callServerTool("debrief_submit", { payload, idempotency_key: key, scope: "work" }));
+          document.getElementById("stage2").innerHTML = `<div class="panel"><div class="section-title">Result</div>
+            <pre class="mono" style="white-space:pre-wrap">${esc(JSON.stringify(res,null,2))}</pre></div>`;
+        } catch (err) {
+          document.getElementById("stage2").innerHTML = `<div class="error">debrief_submit<br/>${esc(err.message)}</div>`;
+        }
+      };
+    } catch (err) {
+      document.getElementById("stage2").innerHTML = `<div class="error">debrief_preview<br/>${esc(err.message)}</div>`;
+    }
+  };
+}
+bridge.onToolResult((data) => renderForm(ZiksakaBridge.structured(data) || data));
+bridge.connect().catch((e) => { root.innerHTML = `<div class="error"><strong>debrief_form</strong><br/>${esc(e.message)}</div>`; });
+
+</script>
+</body>
+</html>

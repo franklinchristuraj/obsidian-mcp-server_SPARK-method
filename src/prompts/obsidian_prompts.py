@@ -305,7 +305,10 @@ Use only registered tool names (legacy `obs_*` names are not available).
   - `obsidian://notes/work/entities/{type}/{slug}.md`
   — or scoped tools (`list_notes`, `read_note`, `search`, `list_journal`, vault intelligence).
 - **Scope-filtered**: list and read enforce the same API-key workspace scopes as tools. A work-only key cannot browse `personal/`.
-- **MCP Apps (future)**: interactive UIs use `ui://ziksaka/...` resources (`text/html;profile=mcp-app`) referenced from tools via `_meta.ui.resourceUri` — separate from the vault browse map. Registry is empty until the first app ships.
+- **MCP Apps**: interactive UIs use `ui://ziksaka/...` resources (`text/html;profile=mcp-app`)
+  referenced from tools via `_meta.ui.resourceUri`. Apps: `prep_card`, `lint_queue`,
+  `snapshot_grid`, `debrief_form`, `triage_board` (plus app-only helpers). First-class
+  vault primitive: `promote_capture`. Smoke: `mcp_apps_smoke`.
 
 ## 7. Claude / Cursor skills (outside this server)
 

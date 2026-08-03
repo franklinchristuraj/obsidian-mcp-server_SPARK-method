@@ -1,0 +1,10 @@
+{
+  "name": "ziksaka-mcp-apps",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Ziksaka MCP Apps UI monorepo (Preact/htm-ready; dist HTML is currently assembled by scripts/build_apps.py)",
+  "scripts": {
+    "build": "python3 scripts/build_apps.py",
+    "build:check": "python3 -c \"from pathlib import Path; d=Path('apps/dist'); assert all((d/f'{a}.html').is_file() for a in ['smoke','prep-card','lint-queue','snapshot-entry','debrief-form','triage-board'])\""
+  }
+}

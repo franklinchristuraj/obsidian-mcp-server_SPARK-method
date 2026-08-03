@@ -75,7 +75,9 @@ class TestResourcesWorkspaceRoots(unittest.IsolatedAsyncioTestCase):
             any(u.endswith("acme.md") for u in uris),
             msg="entity notes must not appear in resources/list",
         )
-        self.assertEqual(len(discovered), 1 + 3 + 3)  # root + workspaces + pins
+        ui_count = sum(1 for u in uris if u.startswith("ui://"))
+        self.assertEqual(len(discovered), 1 + 3 + 3 + ui_count)  # root + workspaces + pins + UI
+        self.assertGreaterEqual(ui_count, 1)
 
     async def test_discover_respects_work_only_scope(self) -> None:
         token = workspace_ctx.set(
@@ -138,8 +140,10 @@ class TestResourcesWorkspaceRoots(unittest.IsolatedAsyncioTestCase):
         self.assertIn("obsidian://notes/{scope}/06_daily-notes/{date}.md", uris)
         self.assertIn("obsidian://notes/work/entities/{type}/{slug}.md", uris)
 
-    def test_ui_registry_empty_foundation(self) -> None:
-        self.assertEqual(self.resources.list_ui_resources(), [])
+    def test_ui_registry_lists_bundles(self) -> None:
+        resources = self.resources.list_ui_resources()
+        uris = {r.uri for r in resources}
+        self.assertIn("ui://ziksaka/smoke", uris)
         self.assertEqual(
             self.resources.build_ui_uri("impact/rollup"),
             "ui://ziksaka/impact/rollup",

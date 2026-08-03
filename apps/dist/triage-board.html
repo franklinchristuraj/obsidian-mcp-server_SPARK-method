@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Triage Board</title>
+<style>
+:root {
+  --fa-teal: #0E7C86;
+  --fa-teal-40: #6EB0B6;
+  --fa-teal-20: #B7DBDE;
+  --fa-coral: #C24A22;
+  --fa-coral-40: #DD8E74;
+  --fa-coral-20: #EFCBBD;
+  --fa-sand: #FBF8F5;
+  --fa-white: #FFFFFF;
+  --fa-amber: #D98A15;
+  --fa-ink: #04211B;
+  --fa-black: #1C1B19;
+  --fa-stone: #5F5E5A;
+  --fa-font: Inter, "Space Grotesk", system-ui, -apple-system, sans-serif;
+  --fa-radius: 6px;
+  --fa-gap: 12px;
+  --fa-surface: var(--fa-sand);
+  --fa-text: var(--fa-black);
+  --fa-muted: var(--fa-stone);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fa-surface: var(--fa-ink);
+    --fa-text: var(--fa-white);
+    --fa-muted: #9C9A92;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--fa-font);
+  background: var(--fa-surface);
+  color: var(--fa-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.app {
+  padding: 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  max-width: 700px;
+  margin: 0 auto;
+}
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fa-teal);
+  font-weight: 600;
+}
+h1 {
+  margin: 4px 0 6px;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+.muted { color: var(--fa-muted); }
+.amber { color: var(--fa-amber); }
+.coral { color: var(--fa-coral); }
+.panel {
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-teal-20);
+  border-radius: var(--fa-radius);
+  padding: 12px;
+  margin-top: 12px;
+}
+.section-title {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fa-teal);
+  font-weight: 700;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.row { margin: 6px 0; }
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+button {
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--fa-radius);
+  padding: 10px 14px;
+  min-height: 44px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+button.primary {
+  background: var(--fa-coral);
+  color: var(--fa-white);
+  border-color: var(--fa-coral);
+}
+button.primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+button.ghost {
+  background: transparent;
+  color: var(--fa-text);
+  border-color: var(--fa-teal-40);
+}
+.skel {
+  height: 14px;
+  background: var(--fa-teal-20);
+  border-radius: 4px;
+  margin: 8px 0;
+  opacity: 0.5;
+}
+.gap-item::before { content: "⚠ "; color: var(--fa-amber); }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.strike { text-decoration: line-through; color: var(--fa-stone); }
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.dot.fresh { background: var(--fa-teal); }
+.dot.aging { background: var(--fa-amber); }
+.dot.stale { background: var(--fa-amber); }
+.error {
+  border: 1px solid var(--fa-coral);
+  padding: 12px;
+  border-radius: var(--fa-radius);
+  color: var(--fa-text);
+}
+.empty { color: var(--fa-muted); padding: 16px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--fa-teal-20); }
+th { color: var(--fa-teal); font-size: 11px; letter-spacing: 0.06em; }
+.amber-rule { border-left: 3px solid var(--fa-amber); padding-left: 8px; }
+
+
+</style>
+</head>
+<body>
+<div class="app" id="root"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+<script>
+/**
+ * Minimal MCP Apps host bridge (postMessage JSON-RPC).
+ * Compatible enough for Claude hosts; no network, no CDN.
+ */
+(function (global) {
+  function ZiksakaBridge(appName) {
+    this.appName = appName;
+    this._id = 1;
+    this._pending = new Map();
+    this._onResult = null;
+    this._onError = null;
+    this.hostContext = {};
+    var self = this;
+    window.addEventListener("message", function (ev) {
+      self._onMessage(ev);
+    });
+  }
+
+  ZiksakaBridge.prototype.connect = function () {
+    var self = this;
+    return this._request("ui/initialize", {
+      appInfo: { name: this.appName, version: "1.0.0" },
+      appCapabilities: {
+        availableDisplayModes: ["inline", "fullscreen"],
+      },
+    }).then(function (result) {
+      self.hostContext = (result && result.hostContext) || {};
+      return result;
+    });
+  };
+
+  ZiksakaBridge.prototype.onToolResult = function (fn) {
+    this._onResult = fn;
+  };
+
+  ZiksakaBridge.prototype.onToolError = function (fn) {
+    this._onError = fn;
+  };
+
+  ZiksakaBridge.prototype.callServerTool = function (name, args) {
+    return this._request("tools/call", {
+      name: name,
+      arguments: args || {},
+    });
+  };
+
+  ZiksakaBridge.prototype.sendFollowup = function (message) {
+    return this._request("ui/message", { role: "user", content: message }).catch(
+      function () {
+        return self._request("ui/open-link", { url: "#" }).catch(function () {
+          return null;
+        });
+      }
+    );
+  };
+
+  ZiksakaBridge.prototype.requestFullscreen = function () {
+    return this._request("ui/request-display-mode", { mode: "fullscreen" }).catch(
+      function () {
+        return null;
+      }
+    );
+  };
+
+  ZiksakaBridge.prototype._request = function (method, params) {
+    var id = this._id++;
+    var self = this;
+    return new Promise(function (resolve, reject) {
+      self._pending.set(id, { resolve: resolve, reject: reject });
+      var msg = { jsonrpc: "2.0", id: id, method: method, params: params || {} };
+      (window.parent || window).postMessage(msg, "*");
+      setTimeout(function () {
+        if (self._pending.has(id)) {
+          self._pending.delete(id);
+          reject(new Error("timeout waiting for host: " + method));
+        }
+      }, 15000);
+    });
+  };
+
+  ZiksakaBridge.prototype._onMessage = function (ev) {
+    var data = ev.data;
+    if (!data || data.jsonrpc !== "2.0") return;
+    if (data.id != null && this._pending.has(data.id)) {
+      var p = this._pending.get(data.id);
+      this._pending.delete(data.id);
+      if (data.error) p.reject(new Error(data.error.message || "host error"));
+      else p.resolve(data.result);
+      return;
+    }
+    if (data.method === "ui/notifications/tool-result" || data.method === "tool-result") {
+      var result = (data.params && (data.params.structuredContent || data.params.result)) || data.params;
+      if (this._onResult) this._onResult(result, data.params);
+    }
+    if (data.method === "ui/notifications/tool-input" && data.params) {
+      // Host may stream input; ignore for now
+    }
+  };
+
+  /** Extract structured payload from a tools/call result. */
+  ZiksakaBridge.structured = function (result) {
+    if (!result) return null;
+    if (result.structuredContent) return result.structuredContent;
+    if (result.metadata) return result.metadata;
+    if (result.content && result.content[0] && result.content[0].text) {
+      try {
+        return JSON.parse(result.content[0].text);
+      } catch (e) {
+        return { text: result.content[0].text };
+      }
+    }
+    return result;
+  };
+
+  global.ZiksakaBridge = ZiksakaBridge;
+})(window);
+
+</script>
+<script>
+
+const root = document.getElementById("root");
+const bridge = new ZiksakaBridge("triage-board");
+let items = [];
+let idx = 0;
+let session = { promoted: 0, archived: 0, skipped: 0 };
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c])); }
+
+function renderCard() {
+  if (!items.length || idx >= items.length) {
+    const remain = Math.max(0, items.length - idx);
+    root.innerHTML = `<div class="eyebrow">TRIAGE</div><h1>Session done</h1>
+      <p>${session.promoted} promoted, ${session.archived} archived, ${session.skipped} skipped. ${remain} remain.</p>`;
+    return;
+  }
+  const it = items[idx];
+  const total = items.length;
+  const filled = "●".repeat(idx) + "○".repeat(Math.max(0, total - idx));
+  let html = `<div class="eyebrow" style="color:var(--fa-teal)">${esc(filled.slice(0,22))} <span style="float:right">${idx+1} of ${total}</span></div>
+    <div class="panel">
+      <div class="eyebrow">${esc((it.capture_type||"").toUpperCase())} · ${it.age_days!=null?esc(it.age_days)+" days old":""}</div>
+      <h1 style="font-size:20px">${esc(it.spark || "(no spark)")}</h1>
+      ${(it.gaps||[]).includes("no spark") ? `<p class="amber">gap: no spark</p>` : ""}
+      <p class="muted">${esc(it.excerpt||"")}</p>
+      ${it.source ? `<p class="muted">source: ${esc(it.source)}</p>` : ""}
+    </div>
+    <div class="actions" id="actions">
+      <button class="primary" id="btn-promote">Promote</button>
+      <button class="ghost" id="btn-resource">Resource</button>
+      <button class="ghost" id="btn-archive">Archive</button>
+      <button class="ghost" id="btn-skip">Skip</button>
+    </div>
+    <div id="promote-panel"></div>`;
+  root.innerHTML = html;
+  document.getElementById("btn-skip").onclick = () => {
+    session.skipped++;
+    const [x] = items.splice(idx, 1);
+    items.push(x);
+    renderCard();
+  };
+  document.getElementById("btn-archive").onclick = async () => {
+    try {
+      await bridge.callServerTool("archive_capture", { path: it.path });
+      session.archived++;
+      items.splice(idx, 1);
+      renderCard();
+    } catch (err) {
+      document.getElementById("promote-panel").innerHTML = `<div class="error">archive_capture<br/>${esc(err.message)}</div>`;
+    }
+  };
+  function openPromote(defaultType) {
+    document.getElementById("promote-panel").innerHTML = `<div class="panel">
+      <div class="section-title">Promote</div>
+      <div class="actions" id="scopes">
+        <button class="ghost" data-s="personal">personal</button>
+        <button class="ghost" data-s="passion">passion</button>
+        <button class="ghost" data-s="work">work</button>
+      </div>
+      <div class="actions" id="types">
+        <button class="ghost" data-t="seed" data-f="01_seeds">seed</button>
+        <button class="ghost" data-t="resource" data-f="04_resources">resource</button>
+        <button class="ghost" data-t="knowledge" data-f="05_knowledge">knowledge</button>
+      </div>
+      <label>Title <input id="p-title" value="${esc(it.title||"")}" style="width:100%"/></label>
+      <button class="primary" id="btn-go" disabled>Confirm promote</button>
+    </div>`;
+    let scope = null, target_type = defaultType || null, target_folder = null;
+    const map = { seed: "01_seeds", resource: "04_resources", knowledge: "05_knowledge" };
+    if (target_type) target_folder = map[target_type];
+    const sync = () => { document.getElementById("btn-go").disabled = !(scope && target_type && target_folder); };
+    document.querySelectorAll("#scopes button").forEach(b => b.onclick = () => { scope = b.dataset.s; sync(); });
+    document.querySelectorAll("#types button").forEach(b => b.onclick = () => { target_type = b.dataset.t; target_folder = b.dataset.f; sync(); });
+    sync();
+    document.getElementById("btn-go").onclick = async () => {
+      try {
+        await bridge.callServerTool("promote_capture", {
+          path: it.path, scope, target_folder, target_type,
+          title: document.getElementById("p-title").value || undefined,
+        });
+        session.promoted++;
+        items.splice(idx, 1);
+        renderCard();
+      } catch (err) {
+        document.getElementById("promote-panel").innerHTML = `<div class="error">promote_capture<br/>${esc(err.message)}</div>`;
+      }
+    };
+  }
+  document.getElementById("btn-promote").onclick = () => openPromote("seed");
+  document.getElementById("btn-resource").onclick = () => openPromote("resource");
+}
+
+function boot(data) {
+  items = (data.items || []).slice();
+  idx = 0;
+  session = { promoted: 0, archived: 0, skipped: 0 };
+  renderCard();
+}
+bridge.onToolResult((data) => boot(ZiksakaBridge.structured(data) || data));
+bridge.connect().catch((e) => { root.innerHTML = `<div class="error"><strong>triage_board</strong><br/>${esc(e.message)}</div>`; });
+
+</script>
+</body>
+</html>

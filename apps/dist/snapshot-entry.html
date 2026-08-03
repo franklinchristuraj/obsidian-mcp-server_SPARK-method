@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Snapshot Entry</title>
+<style>
+:root {
+  --fa-teal: #0E7C86;
+  --fa-teal-40: #6EB0B6;
+  --fa-teal-20: #B7DBDE;
+  --fa-coral: #C24A22;
+  --fa-coral-40: #DD8E74;
+  --fa-coral-20: #EFCBBD;
+  --fa-sand: #FBF8F5;
+  --fa-white: #FFFFFF;
+  --fa-amber: #D98A15;
+  --fa-ink: #04211B;
+  --fa-black: #1C1B19;
+  --fa-stone: #5F5E5A;
+  --fa-font: Inter, "Space Grotesk", system-ui, -apple-system, sans-serif;
+  --fa-radius: 6px;
+  --fa-gap: 12px;
+  --fa-surface: var(--fa-sand);
+  --fa-text: var(--fa-black);
+  --fa-muted: var(--fa-stone);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fa-surface: var(--fa-ink);
+    --fa-text: var(--fa-white);
+    --fa-muted: #9C9A92;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--fa-font);
+  background: var(--fa-surface);
+  color: var(--fa-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.app {
+  padding: 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  max-width: 700px;
+  margin: 0 auto;
+}
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fa-teal);
+  font-weight: 600;
+}
+h1 {
+  margin: 4px 0 6px;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+.muted { color: var(--fa-muted); }
+.amber { color: var(--fa-amber); }
+.coral { color: var(--fa-coral); }
+.panel {
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-teal-20);
+  border-radius: var(--fa-radius);
+  padding: 12px;
+  margin-top: 12px;
+}
+.section-title {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fa-teal);
+  font-weight: 700;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.row { margin: 6px 0; }
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+button {
+  font-family: inherit;
+  font-size: 14px;
+  border-radius: var(--fa-radius);
+  padding: 10px 14px;
+  min-height: 44px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+button.primary {
+  background: var(--fa-coral);
+  color: var(--fa-white);
+  border-color: var(--fa-coral);
+}
+button.primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+button.ghost {
+  background: transparent;
+  color: var(--fa-text);
+  border-color: var(--fa-teal-40);
+}
+.skel {
+  height: 14px;
+  background: var(--fa-teal-20);
+  border-radius: 4px;
+  margin: 8px 0;
+  opacity: 0.5;
+}
+.gap-item::before { content: "⚠ "; color: var(--fa-amber); }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.strike { text-decoration: line-through; color: var(--fa-stone); }
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.dot.fresh { background: var(--fa-teal); }
+.dot.aging { background: var(--fa-amber); }
+.dot.stale { background: var(--fa-amber); }
+.error {
+  border: 1px solid var(--fa-coral);
+  padding: 12px;
+  border-radius: var(--fa-radius);
+  color: var(--fa-text);
+}
+.empty { color: var(--fa-muted); padding: 16px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--fa-teal-20); }
+th { color: var(--fa-teal); font-size: 11px; letter-spacing: 0.06em; }
+.amber-rule { border-left: 3px solid var(--fa-amber); padding-left: 8px; }
+
+
+</style>
+</head>
+<body>
+<div class="app" id="root"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+<script>
+/**
+ * Minimal MCP Apps host bridge (postMessage JSON-RPC).
+ * Compatible enough for Claude hosts; no network, no CDN.
+ */
+(function (global) {
+  function ZiksakaBridge(appName) {
+    this.appName = appName;
+    this._id = 1;
+    this._pending = new Map();
+    this._onResult = null;
+    this._onError = null;
+    this.hostContext = {};
+    var self = this;
+    window.addEventListener("message", function (ev) {
+      self._onMessage(ev);
+    });
+  }
+
+  ZiksakaBridge.prototype.connect = function () {
+    var self = this;
+    return this._request("ui/initialize", {
+      appInfo: { name: this.appName, version: "1.0.0" },
+      appCapabilities: {
+        availableDisplayModes: ["inline", "fullscreen"],
+      },
+    }).then(function (result) {
+      self.hostContext = (result && result.hostContext) || {};
+      return result;
+    });
+  };
+
+  ZiksakaBridge.prototype.onToolResult = function (fn) {
+    this._onResult = fn;
+  };
+
+  ZiksakaBridge.prototype.onToolError = function (fn) {
+    this._onError = fn;
+  };
+
+  ZiksakaBridge.prototype.callServerTool = function (name, args) {
+    return this._request("tools/call", {
+      name: name,
+      arguments: args || {},
+    });
+  };
+
+  ZiksakaBridge.prototype.sendFollowup = function (message) {
+    return this._request("ui/message", { role: "user", content: message }).catch(
+      function () {
+        return self._request("ui/open-link", { url: "#" }).catch(function () {
+          return null;
+        });
+      }
+    );
+  };
+
+  ZiksakaBridge.prototype.requestFullscreen = function () {
+    return this._request("ui/request-display-mode", { mode: "fullscreen" }).catch(
+      function () {
+        return null;
+      }
+    );
+  };
+
+  ZiksakaBridge.prototype._request = function (method, params) {
+    var id = this._id++;
+    var self = this;
+    return new Promise(function (resolve, reject) {
+      self._pending.set(id, { resolve: resolve, reject: reject });
+      var msg = { jsonrpc: "2.0", id: id, method: method, params: params || {} };
+      (window.parent || window).postMessage(msg, "*");
+      setTimeout(function () {
+        if (self._pending.has(id)) {
+          self._pending.delete(id);
+          reject(new Error("timeout waiting for host: " + method));
+        }
+      }, 15000);
+    });
+  };
+
+  ZiksakaBridge.prototype._onMessage = function (ev) {
+    var data = ev.data;
+    if (!data || data.jsonrpc !== "2.0") return;
+    if (data.id != null && this._pending.has(data.id)) {
+      var p = this._pending.get(data.id);
+      this._pending.delete(data.id);
+      if (data.error) p.reject(new Error(data.error.message || "host error"));
+      else p.resolve(data.result);
+      return;
+    }
+    if (data.method === "ui/notifications/tool-result" || data.method === "tool-result") {
+      var result = (data.params && (data.params.structuredContent || data.params.result)) || data.params;
+      if (this._onResult) this._onResult(result, data.params);
+    }
+    if (data.method === "ui/notifications/tool-input" && data.params) {
+      // Host may stream input; ignore for now
+    }
+  };
+
+  /** Extract structured payload from a tools/call result. */
+  ZiksakaBridge.structured = function (result) {
+    if (!result) return null;
+    if (result.structuredContent) return result.structuredContent;
+    if (result.metadata) return result.metadata;
+    if (result.content && result.content[0] && result.content[0].text) {
+      try {
+        return JSON.parse(result.content[0].text);
+      } catch (e) {
+        return { text: result.content[0].text };
+      }
+    }
+    return result;
+  };
+
+  global.ZiksakaBridge = ZiksakaBridge;
+})(window);
+
+</script>
+<script>
+
+const root = document.getElementById("root");
+const bridge = new ZiksakaBridge("snapshot-entry");
+const pending = [];
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c])); }
+function cell(v){ return v == null || v === "" ? "·" : esc(v); }
+
+function render(data) {
+  pending.length = 0;
+  let html = `<div class="eyebrow">WORK · SNAPSHOTS</div><h1>Snapshot entry</h1>`;
+  (data.blocked || []).forEach(b => {
+    html += `<div class="panel gap-item amber">${esc(b.path)} — ${esc(b.reason)}</div>`;
+  });
+  (data.orgs || []).forEach(org => {
+    html += `<div class="panel"><div class="section-title">${esc(org.display_name)} · ${esc(org.org_id)}</div>`;
+    (org.engagements || []).forEach(eng => {
+      const prospect = eng.customer_status === "prospect";
+      html += `<div class="muted">${esc(eng.engagement_type||"")} · ${esc(eng.customer_status||"")} · ${esc(eng.engagement_date)}</div>`;
+      html += `<table><thead><tr><th>WINDOW</th>`;
+      if (!prospect) html += `<th>SCEN.</th><th>APPS</th><th>OPS</th><th>USERS</th>`;
+      html += `<th>MODE</th></tr></thead><tbody>`;
+      (eng.windows || []).forEach((w, wi) => {
+        const snap = w.snapshot || {};
+        const m = snap.metrics || {};
+        const recon = snap.mode === "reconstructed";
+        html += `<tr class="${recon?"amber-rule":""}"><td>${w.offset}</td>`;
+        if (!prospect) {
+          if (w.status === "present") {
+            html += `<td>${cell(m.scenarios)}</td><td>${cell(m.ai_apps)}</td><td>${cell(m.ops_consumed)}</td><td>${cell(m.active_users)}</td>`;
+          } else {
+            html += `<td>·</td><td>·</td><td>·</td><td>·</td>`;
+          }
+        }
+        if (w.status === "missing" || w.status === "out_of_tolerance") {
+          const key = `${org.org_id}|${w.target_date}`;
+          html += `<td>
+            <label><input type="radio" name="mode-${key}" value="live"/> live</label>
+            <label><input type="radio" name="mode-${key}" value="reconstructed"/> reconstructed</label>
+            <button class="ghost" data-key="${esc(key)}" data-org="${esc(org.org_id)}" data-date="${esc(w.target_date)}" data-queue="1">queue</button>
+          </td>`;
+        } else {
+          html += `<td>${esc(snap.mode||"")}</td>`;
+        }
+        html += `</tr>`;
+      });
+      html += `</tbody></table>`;
+    });
+    html += `</div>`;
+  });
+  if (!(data.orgs||[]).length && !(data.blocked||[]).length) {
+    html += `<div class="empty">No engagements in range.</div>`;
+  }
+  html += `<div class="actions"><button class="primary" id="btn-save" disabled>Save snapshots</button></div><div id="preview"></div>`;
+  root.innerHTML = html;
+  root.querySelectorAll("button[data-queue]").forEach(btn => {
+    btn.onclick = () => {
+      const key = btn.dataset.key;
+      const modeEl = root.querySelector(`input[name="mode-${key}"]:checked`);
+      if (!modeEl) { alert("Pick live or reconstructed — nothing is defaulted."); return; }
+      pending.push({ org_id: btn.dataset.org, date: btn.dataset.date, mode: modeEl.value, source: "c360", metrics: {} });
+      document.getElementById("btn-save").disabled = pending.length === 0;
+      document.getElementById("btn-save").textContent = `Save snapshots (${pending.length})`;
+    };
+  });
+  document.getElementById("btn-save").onclick = async () => {
+    const preview = document.getElementById("preview");
+    preview.innerHTML = `<div class="panel">Writing ${pending.length} snapshots. Re-saves overwrite in place.</div>
+      <button class="primary" id="btn-confirm">Confirm write</button>`;
+    document.getElementById("btn-confirm").onclick = async () => {
+      try {
+        await bridge.callServerTool("snapshot_save", { rows: pending, scope: "work" });
+        const fresh = await bridge.callServerTool("snapshot_grid", { scope: "work" });
+        render(ZiksakaBridge.structured(fresh));
+      } catch (err) {
+        preview.innerHTML = `<div class="error">snapshot_save<br/>${esc(err.message)}</div>`;
+      }
+    };
+  };
+}
+bridge.onToolResult((data) => render(ZiksakaBridge.structured(data) || data));
+bridge.connect().catch((e) => { root.innerHTML = `<div class="error"><strong>snapshot_grid</strong><br/>${esc(e.message)}</div>`; });
+
+</script>
+</body>
+</html>

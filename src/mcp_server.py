@@ -59,9 +59,9 @@ class MCPProtocolHandler:
             "version": "2.1.0",
             "description": (
                 "Obsidian MCP server (v2.1.0): workspace-scoped CRUD (personal / passion / work), "
-                "vault intelligence (resolve_entity, query_frontmatter, get_dossier, graph/timeline tools, "
-                "lint_vault, build_context), capture inbox, create_event, and create_engagement. "
-                "Load MCP prompt vault_mcp_agent_guide first."
+                "vault intelligence, capture inbox, create_event/create_engagement, impact snapshots, "
+                "and MCP Apps (prep_card, lint_queue, snapshot_grid, debrief_form, triage_board, "
+                "promote_capture). Load MCP prompt vault_mcp_agent_guide first."
             ),
         }
         self.instructions = (
@@ -78,7 +78,15 @@ class MCPProtocolHandler:
             prompts={"listChanged": False},
             logging={},
             completions={},
+            extensions={
+                # SEP-1865 MCP Apps
+                "io.modelcontextprotocol/ui": {
+                    "mimeTypes": ["text/html;profile=mcp-app"],
+                }
+            },
         )
+        # Last client capabilities from initialize (diagnostics / future gating).
+        self.client_capabilities: Dict[str, Any] = {}
 
         # Register available tools from obsidian_tools
         self.tools: List[MCPTool] = [
@@ -111,13 +119,13 @@ class MCPProtocolHandler:
         except Exception as e:
             print(f"Warning: Could not load Obsidian tools: {e}")
 
-        # Future application tools can be loaded here following the same pattern
-        # Example:
-        # try:
-        #     from .tools.notion_tools import notion_tools
-        #     self.tools.extend(notion_tools.get_tools())
-        # except Exception as e:
-        #     print(f"Warning: Could not load Notion tools: {e}")
+        # MCP Apps tools (prep_card, lint_queue, …)
+        try:
+            from .apps.registry import get_app_tools
+
+            self.tools.extend(get_app_tools())
+        except Exception as e:
+            print(f"Warning: Could not load MCP App tools: {e}")
 
         # Resources are discovered per API-key scope set (workspace roots + pins).
         self.resources: List[MCPResource] = []
@@ -186,16 +194,24 @@ class MCPProtocolHandler:
             requested_version = params.get("protocolVersion")
             if requested_version in self.SUPPORTED_PROTOCOL_VERSIONS:
                 negotiated_version = requested_version
+            # Persist client caps (including unknown extension blocks); never reject.
+            client_caps = params.get("capabilities")
+            if isinstance(client_caps, dict):
+                self.client_capabilities = dict(client_caps)
+
+        caps: Dict[str, Any] = {
+            "tools": self.capabilities.tools,
+            "resources": self.capabilities.resources,
+            "prompts": self.capabilities.prompts,
+            "logging": self.capabilities.logging,
+            "completions": self.capabilities.completions,
+        }
+        if self.capabilities.extensions:
+            caps["extensions"] = self.capabilities.extensions
 
         return {
             "protocolVersion": negotiated_version,
-            "capabilities": {
-                "tools": self.capabilities.tools,
-                "resources": self.capabilities.resources,
-                "prompts": self.capabilities.prompts,
-                "logging": self.capabilities.logging,
-                "completions": self.capabilities.completions,
-            },
+            "capabilities": caps,
             "serverInfo": self.server_info,
             "instructions": self.instructions,
         }
@@ -245,6 +261,8 @@ class MCPProtocolHandler:
                 tool_dict["annotations"] = tool.annotations
             if tool.outputSchema:
                 tool_dict["outputSchema"] = tool.outputSchema
+            if tool.meta:
+                tool_dict["_meta"] = tool.meta
             tool_dicts.append(tool_dict)
 
         result: Dict[str, Any] = {"tools": tool_dicts}
@@ -317,7 +335,34 @@ class MCPProtocolHandler:
             ):
                 result["structuredContent"] = result["metadata"]
             return result
-        # Future application routing (e.g. notion_) can be added here
+
+        try:
+            from .apps.registry import APP_TOOL_NAMES, execute_app_tool
+        except Exception:
+            APP_TOOL_NAMES = frozenset()
+            execute_app_tool = None  # type: ignore
+
+        if tool_name in APP_TOOL_NAMES and execute_app_tool is not None:
+            try:
+                result = await execute_app_tool(tool_name, arguments)
+            except Exception as e:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"❌ App tool '{tool_name}' failed: {str(e)}",
+                        }
+                    ],
+                    "isError": True,
+                }
+            if (
+                isinstance(result, dict)
+                and "metadata" in result
+                and "structuredContent" not in result
+            ):
+                result["structuredContent"] = result["metadata"]
+            return result
+
         return {
             "content": [
                 {
@@ -345,6 +390,7 @@ class MCPProtocolHandler:
                     "name": resource.name,
                     "description": resource.description,
                     "mimeType": resource.mimeType,
+                    **({"_meta": resource.meta} if resource.meta else {}),
                 }
                 for resource in page
             ]
@@ -386,9 +432,10 @@ class MCPProtocolHandler:
             elif content.blob is not None:
                 result["contents"][0]["blob"] = content.blob
 
-            # Add metadata if available
+            # Add metadata / _meta if available (MCP Apps hosts read `_meta`)
             if content.metadata:
                 result["contents"][0]["metadata"] = content.metadata
+                result["contents"][0]["_meta"] = content.metadata
 
             return result
 

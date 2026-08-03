@@ -35,13 +35,17 @@ class TestToolRegistryContract(unittest.TestCase):
             )
 
     def test_mcp_handler_obsidian_subset(self) -> None:
+        from src.apps.registry import APP_TOOL_NAMES
+
         handler_names = {t.name for t in mcp_handler.tools}
         obs_names = {t.name for t in obsidian_tools.get_tools()}
         self.assertIn("ping", handler_names)
         self.assertTrue(obs_names <= handler_names)
-        self.assertEqual(handler_names - obs_names, {"ping"})
+        self.assertEqual(handler_names - obs_names - APP_TOOL_NAMES, {"ping"})
         self.assertEqual(len(handler_names), len(set(handler_names)))
-        self.assertEqual(len(handler_names), 30)
+        # ping + 29 obsidian + 14 app tools
+        self.assertEqual(len(handler_names), 1 + len(obs_names) + len(APP_TOOL_NAMES))
+        self.assertEqual(len(handler_names), 44)
 
     def test_every_obsidian_tool_has_contract_metadata(self) -> None:
         for tool in obsidian_tools.get_tools():
