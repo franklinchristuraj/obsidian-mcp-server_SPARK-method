@@ -1,19 +1,34 @@
 """
 Obsidian Resources Implementation for MCP Protocol
-Handles browseable vault structure via obsidian://notes/{path} URI patterns.
+Handles browseable vault access via obsidian://notes/{path} URI patterns.
 
-URIs use full vault-relative paths (often starting with personal/, passion/, or work/).
-MCP tools enforce API-key workspace scope; resources/list and resources/read do not—
-prefer tools when the connection is scope-restricted.
+resources/list exposes a tiny curated set: vault root, allowed workspace roots,
+and optional root pins (AGENTS.md / index.md / CLAUDE.md). Deep paths use
+resources/read, RFC 6570 templates, or scoped MCP tools.
+
+Both list and read enforce API-key workspace scope (same ContextVar as tools).
+Future MCP Apps UI bundles use the ui:// scheme (see list_ui_resources).
 """
+from __future__ import annotations
+
 import asyncio
+import json
+import os
 import urllib.parse
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime, timedelta
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..clients.obsidian_client import ObsidianAPIError, ObsidianClient
+from ..scope import KNOWN_SCOPES, get_effective_workspace_context
 from ..types import MCPResource, MCPResourceTemplate
-from ..clients.obsidian_client import ObsidianClient, ObsidianAPIError
-from ..scope import KNOWN_SCOPES
+
+
+# Root-level docs agents/apps may pin without a path template.
+CURATED_ROOT_PINS: Tuple[str, ...] = ("AGENTS.md", "index.md", "CLAUDE.md")
+
+UI_MIME_TYPE = "text/html;profile=mcp-app"
 
 
 @dataclass
@@ -29,41 +44,31 @@ class ResourceContent:
 
 class ObsidianResources:
     """
-    Manages MCP Resources for Obsidian vault access
-    Implements browseable vault structure via URI patterns
+    Manages MCP Resources for Obsidian vault access.
+    List = workspace roots + pins; read = any allowed path; templates for deep URIs.
     """
 
     def __init__(self, obsidian_client: ObsidianClient):
         self.client = obsidian_client
         self.resource_cache: Dict[str, Tuple[ResourceContent, datetime]] = {}
-        self.cache_ttl = timedelta(minutes=5)  # Match vault structure cache
+        self.cache_ttl = timedelta(minutes=5)
         self.uri_scheme = "obsidian"
         self.uri_authority = "notes"
+        self.ui_scheme = "ui"
+        self.ui_authority = "ziksaka"
 
     # =================== URI Pattern Processing ===================
 
     def parse_uri(self, uri: str) -> Tuple[str, str]:
         """
-        Parse obsidian://notes/{path} URI into components
-
-        Args:
-            uri: Resource URI (e.g., "obsidian://notes/daily/2024-01-15.md")
-
-        Returns:
-            Tuple of (scheme_authority, path)
-
-        Raises:
-            ValueError: If URI format is invalid
+        Parse obsidian://notes/{path} URI into (scheme_authority, path).
         """
         if not uri.startswith(f"{self.uri_scheme}://"):
             raise ValueError(
                 f"Invalid URI scheme. Expected '{self.uri_scheme}://', got: {uri}"
             )
 
-        # Remove scheme
         without_scheme = uri[len(f"{self.uri_scheme}://") :]
-
-        # Split authority and path
         parts = without_scheme.split("/", 1)
         authority = parts[0]
         path = parts[1] if len(parts) > 1 else ""
@@ -73,49 +78,36 @@ class ObsidianResources:
                 f"Invalid URI authority. Expected '{self.uri_authority}', got: {authority}"
             )
 
-        # URL decode the path
         path = urllib.parse.unquote(path)
-
         return f"{self.uri_scheme}://{authority}", path
 
     def build_uri(self, path: str) -> str:
-        """
-        Build obsidian://notes/{path} URI from path
-
-        Args:
-            path: Vault path (e.g., "daily/2024-01-15.md")
-
-        Returns:
-            Complete URI
-        """
-        # URL encode the path
+        """Build obsidian://notes/{path} URI from vault-relative path."""
         encoded_path = urllib.parse.quote(path, safe="/")
         return f"{self.uri_scheme}://{self.uri_authority}/{encoded_path}"
 
-    def _workspace_prefix(self, path: str) -> Optional[str]:
-        """First path segment if it is a known workspace folder name."""
-        if not path or path in ("/", ""):
-            return None
-        first = path.strip("/").split("/")[0]
-        return first if first in KNOWN_SCOPES else None
+    def _allowed_scopes(self) -> Tuple[str, ...]:
+        return tuple(get_effective_workspace_context().allowed_scopes)
 
-    def _folder_description(self, folder_path: str, name: str, notes_count: int, subfolders: int) -> str:
-        ws = self._workspace_prefix(folder_path.strip("/"))
-        base = f"{notes_count} notes, {subfolders} subfolders"
-        if ws:
-            return f"Workspace `{ws}` · {base}"
-        return f"Folder `{name}` · {base}"
+    def _assert_path_allowed(self, path: str) -> None:
+        """Enforce API-key workspace scope for resource reads."""
+        allowed = self._allowed_scopes()
+        cleaned = (path or "").strip("/")
+        if not cleaned:
+            return
+        first = cleaned.split("/")[0]
+        if first in KNOWN_SCOPES:
+            if first not in allowed:
+                raise PermissionError(f"Access denied to workspace `{first}`")
+            return
+        if cleaned in CURATED_ROOT_PINS:
+            return
+        raise PermissionError(f"Access denied to resource path `{cleaned}`")
 
     def is_folder_path(self, path: str) -> bool:
-        """
-        Determine if path represents a folder (ends with / or has no extension)
-        """
+        """True if path represents a folder (ends with / or has no extension)."""
         if not path or path.endswith("/"):
             return True
-
-        # Check if path has file extension
-        import os
-
         _, ext = os.path.splitext(path)
         return not ext
 
@@ -123,139 +115,176 @@ class ObsidianResources:
 
     async def discover_resources(self) -> List[MCPResource]:
         """
-        Discover browseable folder resources from vault structure.
+        List vault root + allowed workspace roots + curated root pins.
 
-        Lists vault root + folders only (~tens–low hundreds). Individual notes
-        are not enumerated: clients read them via resources/read using the
-        ``obsidian://notes/{+path}`` template, or via scoped tools
-        (list_notes / read_note / search / list_journal).
+        No full vault walk. Deep notes/folders are reached via resources/read,
+        templates, or scoped tools. Results respect the current API-key scopes.
         """
-        resources = []
+        allowed = self._allowed_scopes()
+        vault_root = Path(self.client.vault_path)
+        resources: List[MCPResource] = [
+            MCPResource(
+                uri=f"{self.uri_scheme}://{self.uri_authority}/",
+                name="Vault Root",
+                description=(
+                    "Top-level vault browse (scope-filtered). Workspace roots for "
+                    f"this key: {', '.join(allowed) or '(none)'}. Notes are not "
+                    "enumerated—use resources/read with obsidian://notes/{+path}, "
+                    "or scoped tools (list_notes/read_note/search)."
+                ),
+                mimeType="application/json",
+            )
+        ]
 
-        try:
-            # Add vault root resource
+        for scope in KNOWN_SCOPES:
+            if scope not in allowed:
+                continue
+            scope_dir = vault_root / scope
+            if not scope_dir.is_dir():
+                continue
             resources.append(
                 MCPResource(
-                    uri=f"{self.uri_scheme}://{self.uri_authority}/",
-                    name="Vault Root",
+                    uri=self.build_uri(f"{scope}/"),
+                    name=scope,
                     description=(
-                        "Top-level vault browse. Expect workspace roots: personal/, passion/, work/. "
-                        "Folder map only—notes are not listed here; use resources/read with "
-                        "obsidian://notes/{+path}, or scoped tools (list_notes/read_note/search). "
-                        "Resources are not API-key scope filtered."
+                        f"Workspace `{scope}` root. Read for a folder listing; "
+                        "use tools or path templates for notes inside."
                     ),
                     mimeType="application/json",
                 )
             )
 
-            # Folders only: avoid listing every .md as an MCP resource (large vaults
-            # previously produced ~800 entries, mostly daily notes / entities / meetings).
-            vault_structure = await self.client.get_vault_structure(
-                use_cache=True, include_notes=False
-            )
-
-            for folder in vault_structure.folders:
-                folder_path = folder.path.rstrip("/") + "/"
+        for pin in CURATED_ROOT_PINS:
+            pin_path = vault_root / pin
+            if pin_path.is_file():
                 resources.append(
                     MCPResource(
-                        uri=self.build_uri(folder_path),
-                        name=folder.name,
-                        description=self._folder_description(
-                            folder.path,
-                            folder.name,
-                            folder.notes_count,
-                            folder.subfolders_count,
-                        ),
-                        mimeType="application/json",
+                        uri=self.build_uri(pin),
+                        name=pin,
+                        description=f"Vault root pin · {pin}",
+                        mimeType="text/markdown",
                     )
                 )
 
-        except Exception as e:
-            # If vault discovery fails, at least provide root resource
-            print(f"Warning: Resource discovery failed: {e}")
-            if not resources:  # Only add if we don't have vault root already
-                resources.append(
-                    MCPResource(
-                        uri=f"{self.uri_scheme}://{self.uri_authority}/",
-                        name="Vault Root",
-                        description=(
-                            "Vault access (limited). Resources are not scope-filtered; "
-                            "prefer MCP tools with scope when restricted."
-                        ),
-                        mimeType="application/json",
-                    )
-                )
-
+        resources.extend(self.list_ui_resources())
         return resources
 
     def list_resource_templates(self) -> List[MCPResourceTemplate]:
-        """RFC 6570 URI templates for notes/folders not present in resources/list.
-
-        discover_resources() returns folders only; clients (or tools that already
-        know a path) build note URIs via this template without a full-vault walk.
-        """
+        """RFC 6570 URI templates for paths not present in resources/list."""
+        base = f"{self.uri_scheme}://{self.uri_authority}"
         return [
             MCPResourceTemplate(
-                uriTemplate=f"{self.uri_scheme}://{self.uri_authority}/{{+path}}",
+                uriTemplate=f"{base}/{{+path}}",
                 name="Vault note or folder",
                 description=(
-                    "A note (text/markdown) or folder (application/json listing) "
-                    "at a vault-relative path, e.g. work/entities/customer/gojob.md. "
-                    "Same paths tools use, prefixed with the workspace (personal/"
-                    "passion/work). Prefer this (or scoped tools) over expecting "
-                    "every note in resources/list. Not scope-filtered by API key."
+                    "Any vault-relative note or folder, e.g. work/entities/customer/gojob.md. "
+                    "Prefixed with workspace (personal/passion/work). Scope-filtered on read."
                 ),
-            )
+            ),
+            MCPResourceTemplate(
+                uriTemplate=f"{base}/{{scope}}/06_daily-notes/{{date}}.md",
+                name="Daily note",
+                description=(
+                    "Daily journal note. scope=personal|passion|work; date=YYYY-MM-DD. "
+                    "Prefer list_journal / read_note tools when scripting."
+                ),
+            ),
+            MCPResourceTemplate(
+                uriTemplate=f"{base}/work/entities/{{type}}/{{slug}}.md",
+                name="Work entity card",
+                description=(
+                    "Work entity note under entities/{type}/{slug}.md "
+                    "(e.g. customer/gojob). Prefer resolve_entity / get_dossier tools."
+                ),
+            ),
         ]
+
+    def list_ui_resources(self) -> List[MCPResource]:
+        """
+        MCP Apps UI bundles (ui://ziksaka/...).
+
+        Empty until a real HTML app ships. Tools will reference these via
+        ``_meta.ui.resourceUri`` with mimeType text/html;profile=mcp-app.
+        """
+        return []
+
+    def build_ui_uri(self, app_path: str) -> str:
+        """Build ui://ziksaka/{app_path} for future MCP App bundles."""
+        encoded = urllib.parse.quote(app_path.strip("/"), safe="/")
+        return f"{self.ui_scheme}://{self.ui_authority}/{encoded}"
 
     # =================== Resource Content Reading ===================
 
     async def read_resource(self, uri: str) -> ResourceContent:
-        """
-        Read content of a specific resource
+        """Read a resource URI (obsidian://notes/… or future ui://…)."""
+        if uri.startswith(f"{self.ui_scheme}://"):
+            raise ValueError(
+                f"No MCP App UI registered for {uri}. "
+                "ui:// resources ship when the first app is added."
+            )
 
-        Args:
-            uri: Resource URI to read
-
-        Returns:
-            ResourceContent with the resource data
-
-        Raises:
-            ValueError: If URI is invalid
-            ObsidianAPIError: If resource cannot be accessed
-        """
-        # Check cache first
         if uri in self.resource_cache:
             content, cached_time = self.resource_cache[uri]
             if datetime.now() - cached_time < self.cache_ttl:
+                _, cached_path = self.parse_uri(uri)
+                self._assert_path_allowed(cached_path)
                 return content
 
-        # Parse URI
-        scheme_authority, path = self.parse_uri(uri)
+        _, path = self.parse_uri(uri)
+        self._assert_path_allowed(path)
 
-        # Handle different resource types
         if self.is_folder_path(path):
             content = await self._read_folder_resource(uri, path)
+        elif (path or "").strip("/") in CURATED_ROOT_PINS:
+            content = await self._read_root_pin(uri, path.strip("/"))
         else:
             content = await self._read_note_resource(uri, path)
 
-        # Cache the result
         self.resource_cache[uri] = (content, datetime.now())
-
         return content
 
-    async def _read_folder_resource(self, uri: str, path: str) -> ResourceContent:
-        """Read folder resource (returns JSON listing)"""
+    async def _read_root_pin(self, uri: str, pin: str) -> ResourceContent:
+        """Read a vault-root curated pin (not scope-prefixed)."""
+        full = Path(self.client.vault_path) / pin
+
+        def _load() -> Tuple[str, int, float]:
+            text = full.read_text(encoding="utf-8")
+            stat = full.stat()
+            return text, stat.st_size, stat.st_mtime
+
         try:
+            text, size, mtime = await asyncio.to_thread(_load)
+        except FileNotFoundError:
+            raise ObsidianAPIError(f"Note not found: {pin}", 404)
+        except OSError as e:
+            raise ObsidianAPIError(f"Failed to read root pin {pin}: {e}")
+
+        return ResourceContent(
+            uri=uri,
+            mimeType="text/markdown",
+            text=text,
+            metadata={
+                "resource_type": "note",
+                "path": pin,
+                "size": size,
+                "modified": datetime.fromtimestamp(mtime).isoformat(),
+            },
+        )
+
+    async def _read_folder_resource(self, uri: str, path: str) -> ResourceContent:
+        """Read folder resource (returns JSON listing), scope-filtered."""
+        try:
+            allowed = self._allowed_scopes()
             if not path or path == "/":
-                # Vault root - list all top-level items
-                vault_structure = await self.client.get_vault_structure(use_cache=True)
+                vault_structure = await self.client.get_vault_structure(
+                    use_cache=True, include_notes=True
+                )
+                items: List[Dict[str, Any]] = []
 
-                items = []
-
-                # Add folders
                 for folder in vault_structure.folders:
-                    if "/" not in folder.path.strip("/"):  # Top-level folders only
+                    if "/" not in folder.path.strip("/"):
+                        if folder.name not in allowed:
+                            continue
                         items.append(
                             {
                                 "type": "folder",
@@ -267,9 +296,8 @@ class ObsidianResources:
                             }
                         )
 
-                # Add top-level notes
                 for note in vault_structure.notes:
-                    if "/" not in note.path:  # Top-level notes only
+                    if "/" not in note.path and note.path in CURATED_ROOT_PINS:
                         items.append(
                             {
                                 "type": "note",
@@ -282,21 +310,35 @@ class ObsidianResources:
                             }
                         )
 
+                # Workspace roots that exist but have no notes yet still appear
+                vault_root = Path(self.client.vault_path)
+                listed = {i["path"].rstrip("/") for i in items if i["type"] == "folder"}
+                for scope in allowed:
+                    if scope in listed:
+                        continue
+                    if (vault_root / scope).is_dir():
+                        items.append(
+                            {
+                                "type": "folder",
+                                "name": scope,
+                                "path": scope,
+                                "uri": self.build_uri(f"{scope}/"),
+                                "notes_count": 0,
+                                "subfolders_count": 0,
+                            }
+                        )
+
                 content_data = {
                     "folder_path": path or "/",
                     "total_items": len(items),
                     "folders": [item for item in items if item["type"] == "folder"],
                     "notes": [item for item in items if item["type"] == "note"],
                 }
-
             else:
-                # Specific folder - list contents
                 folder_path = path.rstrip("/")
                 folder_contents = await self.client.get_folder_contents(folder_path)
-
                 items = []
 
-                # Process subfolders
                 for folder in folder_contents.get("subfolders", []):
                     items.append(
                         {
@@ -309,7 +351,6 @@ class ObsidianResources:
                         }
                     )
 
-                # Process notes
                 for note in folder_contents.get("notes", []):
                     items.append(
                         {
@@ -328,8 +369,6 @@ class ObsidianResources:
                     "notes": [item for item in items if item["type"] == "note"],
                 }
 
-            import json
-
             return ResourceContent(
                 uri=uri,
                 mimeType="application/json",
@@ -341,16 +380,16 @@ class ObsidianResources:
                 },
             )
 
+        except PermissionError:
+            raise
         except Exception as e:
             raise ObsidianAPIError(f"Failed to read folder resource {uri}: {str(e)}")
 
     async def _read_note_resource(self, uri: str, path: str) -> ResourceContent:
-        """Read note resource (returns markdown content)"""
+        """Read note resource (returns markdown content)."""
         try:
-            # Read note content
             note_content = await self.client.read_note(path)
 
-            # Get note metadata
             try:
                 note_metadata = await self.client.get_note_metadata(path)
                 metadata = {
@@ -364,7 +403,6 @@ class ObsidianResources:
                     "path": path,
                 }
             except Exception:
-                # Fallback if metadata fails
                 metadata = {
                     "resource_type": "note",
                     "path": path,
@@ -385,17 +423,10 @@ class ObsidianResources:
     # =================== Cache Management ===================
 
     def invalidate_cache(self, uri_pattern: Optional[str] = None):
-        """
-        Invalidate resource cache
-
-        Args:
-            uri_pattern: Optional pattern to match URIs for selective invalidation
-        """
+        """Invalidate resource content cache."""
         if uri_pattern is None:
-            # Clear all cache
             self.resource_cache.clear()
         else:
-            # Clear matching URIs
             keys_to_remove = [
                 uri for uri in self.resource_cache.keys() if uri_pattern in uri
             ]
@@ -415,7 +446,7 @@ class ObsidianResources:
         return {
             "total_entries": total_entries,
             "expired_entries": expired_entries,
-            "cache_hit_ratio": "N/A",  # Would need hit/miss tracking
+            "cache_hit_ratio": "N/A",
             "cache_ttl_minutes": self.cache_ttl.total_seconds() / 60,
         }
 

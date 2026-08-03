@@ -5,7 +5,7 @@ Handles Model Context Protocol with SSE streaming support
 import json
 import asyncio
 import time
-from typing import Dict, Any, Optional, List, AsyncGenerator
+from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from .types import MCPMessageType, MCPTool, MCPResource, MCPCapabilities, MCPPrompt
 
 # prompts/get "description" must match each prompt (not a generic template blurb)
@@ -45,8 +45,8 @@ class MCPProtocolHandler:
 
     # Page sizes for cursor pagination (spec 2025-06-18). Tools page size is
     # set well above the current tool count so today's non-paginating clients
-    # keep getting the full list in one response. Resources list folders only
-    # (~100 items); page size still chunks large vaults.
+    # keep getting the full list in one response. Resources list workspace
+    # roots + pins only (~4–8 items); page size still chunks if that grows.
     TOOLS_PAGE_SIZE = 200
     RESOURCES_PAGE_SIZE = 200
 
@@ -119,9 +119,9 @@ class MCPProtocolHandler:
         # except Exception as e:
         #     print(f"Warning: Could not load Notion tools: {e}")
 
-        # Register available resources (loaded dynamically in Phase 4)
+        # Resources are discovered per API-key scope set (workspace roots + pins).
         self.resources: List[MCPResource] = []
-        self._resources_loaded = False
+        self._resources_by_scopes: Dict[Tuple[str, ...], List[MCPResource]] = {}
 
         # Register available prompts
         self.prompts: List[MCPPrompt] = []
@@ -392,6 +392,8 @@ class MCPProtocolHandler:
 
             return result
 
+        except PermissionError as e:
+            raise ValueError(str(e))
         except Exception as e:
             # If ObsidianResources fails, provide a helpful error
             raise ValueError(f"Failed to read resource {uri}: {str(e)}")
@@ -431,31 +433,33 @@ class MCPProtocolHandler:
         self.resources.append(resource)
 
     async def _ensure_resources_loaded(self):
-        """Ensure resources are loaded from ObsidianResources"""
-        if self._resources_loaded:
+        """Load resources for the current API-key scope set (cached per scopes)."""
+        from .scope import get_effective_workspace_context
+
+        scopes = tuple(get_effective_workspace_context().allowed_scopes)
+        cached = self._resources_by_scopes.get(scopes)
+        if cached is not None:
+            self.resources = cached
             return
 
         try:
             from .resources.obsidian_resources import get_obsidian_resources
 
             resources_handler = get_obsidian_resources()
-            discovered_resources = await resources_handler.discover_resources()
-
-            # Replace current resources with discovered ones
-            self.resources = discovered_resources
-            self._resources_loaded = True
-
+            discovered = await resources_handler.discover_resources()
+            self._resources_by_scopes[scopes] = discovered
+            self.resources = discovered
         except Exception as e:
             print(f"Warning: Could not load resources: {e}")
-            # Keep empty resources list if loading fails
-            self._resources_loaded = True  # Don't keep retrying
+            self._resources_by_scopes[scopes] = []
+            self.resources = []
 
     def invalidate_resources_cache(self):
         """Force reload of resources on next request"""
-        self._resources_loaded = False
+        self._resources_by_scopes.clear()
         self.resources = []
 
-        # Also invalidate the ObsidianResources cache
+        # Also invalidate the ObsidianResources content cache
         try:
             from .resources.obsidian_resources import get_obsidian_resources
 

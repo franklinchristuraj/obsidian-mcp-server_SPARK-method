@@ -298,9 +298,14 @@ Use only registered tool names (legacy `obs_*` names are not available).
 
 ## 6. MCP resources vs tools
 
-- **`resources/list`** returns a **folder map only** (vault root + folders)—not every note. Daily notes, entities, meetings, etc. are *not* individual MCP resources.
-- **`resources/read`** still works for any note URI (`obsidian://notes/personal/06_daily-notes/2026-04-11.md`). Prefer the **`obsidian://notes/{+path}`** resource template, or scoped tools.
-- Resources are **not** filtered by API-key workspace scope. If the connection is restricted (e.g. work-only key), **prefer scoped tools** (`list_notes`, `read_note`, `search`, `list_journal`, vault intelligence) with `scope` so the server enforces access.
+- **`resources/list`** returns a **tiny curated set**: vault root, allowed workspace roots (`personal/` / `passion/` / `work/`), and root pins if present (`AGENTS.md`, `index.md`, `CLAUDE.md`). It does **not** enumerate daily notes, entities, meetings, or deep folders.
+- **`resources/read`** still works for deep note/folder URIs (`obsidian://notes/personal/06_daily-notes/2026-04-11.md`). Prefer templates:
+  - `obsidian://notes/{+path}`
+  - `obsidian://notes/{scope}/06_daily-notes/{date}.md`
+  - `obsidian://notes/work/entities/{type}/{slug}.md`
+  — or scoped tools (`list_notes`, `read_note`, `search`, `list_journal`, vault intelligence).
+- **Scope-filtered**: list and read enforce the same API-key workspace scopes as tools. A work-only key cannot browse `personal/`.
+- **MCP Apps (future)**: interactive UIs use `ui://ziksaka/...` resources (`text/html;profile=mcp-app`) referenced from tools via `_meta.ui.resourceUri` — separate from the vault browse map. Registry is empty until the first app ships.
 
 ## 7. Claude / Cursor skills (outside this server)
 
