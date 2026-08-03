@@ -45,8 +45,8 @@ class MCPProtocolHandler:
 
     # Page sizes for cursor pagination (spec 2025-06-18). Tools page size is
     # set well above the current tool count so today's non-paginating clients
-    # keep getting the full list in one response; resources page size is set
-    # to actually chunk the (currently ~800-item) resources/list response.
+    # keep getting the full list in one response. Resources list folders only
+    # (~100 items); page size still chunks large vaults.
     TOOLS_PAGE_SIZE = 200
     RESOURCES_PAGE_SIZE = 200
 

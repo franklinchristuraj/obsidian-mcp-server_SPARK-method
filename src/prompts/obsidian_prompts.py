@@ -298,8 +298,9 @@ Use only registered tool names (legacy `obs_*` names are not available).
 
 ## 6. MCP resources vs tools
 
-- **`resources/list`** and **`resources/read`** use URIs like `obsidian://notes/personal/06_daily-notes/...` and show the **full physical vault tree**.
-- They are **not** filtered by API-key workspace scope. If the connection is restricted (e.g. work-only key), **prefer scoped tools** (`list_notes`, `read_note`, `search`, vault intelligence) with `scope` so the server enforces access.
+- **`resources/list`** returns a **folder map only** (vault root + folders)—not every note. Daily notes, entities, meetings, etc. are *not* individual MCP resources.
+- **`resources/read`** still works for any note URI (`obsidian://notes/personal/06_daily-notes/2026-04-11.md`). Prefer the **`obsidian://notes/{+path}`** resource template, or scoped tools.
+- Resources are **not** filtered by API-key workspace scope. If the connection is restricted (e.g. work-only key), **prefer scoped tools** (`list_notes`, `read_note`, `search`, `list_journal`, vault intelligence) with `scope` so the server enforces access.
 
 ## 7. Claude / Cursor skills (outside this server)
 

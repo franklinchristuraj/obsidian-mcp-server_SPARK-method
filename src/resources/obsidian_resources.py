@@ -106,13 +106,6 @@ class ObsidianResources:
             return f"Workspace `{ws}` · {base}"
         return f"Folder `{name}` · {base}"
 
-    def _note_description(self, path: str, size: int, modified: datetime) -> str:
-        ws = self._workspace_prefix(path)
-        when = modified.strftime("%Y-%m-%d")
-        if ws:
-            return f"Workspace `{ws}` · {size} bytes · modified {when}"
-        return f"Note · {size} bytes · modified {when}"
-
     def is_folder_path(self, path: str) -> bool:
         """
         Determine if path represents a folder (ends with / or has no extension)
@@ -130,10 +123,12 @@ class ObsidianResources:
 
     async def discover_resources(self) -> List[MCPResource]:
         """
-        Discover all available resources from vault structure
+        Discover browseable folder resources from vault structure.
 
-        Returns:
-            List of MCPResource objects for browseable access
+        Lists vault root + folders only (~tens–low hundreds). Individual notes
+        are not enumerated: clients read them via resources/read using the
+        ``obsidian://notes/{+path}`` template, or via scoped tools
+        (list_notes / read_note / search / list_journal).
         """
         resources = []
 
@@ -145,20 +140,20 @@ class ObsidianResources:
                     name="Vault Root",
                     description=(
                         "Top-level vault browse. Expect workspace roots: personal/, passion/, work/. "
-                        "Resources are not API-key scope filtered—use list_notes/read_note/search "
-                        "with scope when the key is restricted."
+                        "Folder map only—notes are not listed here; use resources/read with "
+                        "obsidian://notes/{+path}, or scoped tools (list_notes/read_note/search). "
+                        "Resources are not API-key scope filtered."
                     ),
                     mimeType="application/json",
                 )
             )
 
-            # Full structure including note metadata so resources/list exposes per-file URIs.
-            # Cost: filesystem scan; large vaults may return many resources.
+            # Folders only: avoid listing every .md as an MCP resource (large vaults
+            # previously produced ~800 entries, mostly daily notes / entities / meetings).
             vault_structure = await self.client.get_vault_structure(
-                use_cache=True, include_notes=True
+                use_cache=True, include_notes=False
             )
 
-            # Add folder resources
             for folder in vault_structure.folders:
                 folder_path = folder.path.rstrip("/") + "/"
                 resources.append(
@@ -172,19 +167,6 @@ class ObsidianResources:
                             folder.subfolders_count,
                         ),
                         mimeType="application/json",
-                    )
-                )
-
-            # Add note resources
-            for note in vault_structure.notes:
-                resources.append(
-                    MCPResource(
-                        uri=self.build_uri(note.path),
-                        name=note.name,
-                        description=self._note_description(
-                            note.path, note.size, note.modified
-                        ),
-                        mimeType="text/markdown",
                     )
                 )
 
@@ -207,12 +189,11 @@ class ObsidianResources:
         return resources
 
     def list_resource_templates(self) -> List[MCPResourceTemplate]:
-        """RFC 6570 URI templates a client can fill in itself, instead of only
-        picking from the concrete URIs discover_resources() enumerates (which
-        means walking the whole vault). A client that already has a workspace
-        -relative path (e.g. from a tool's `path`/`canonical_path` field) can
-        build `obsidian://notes/{+path}` directly without a resources/list
-        round trip."""
+        """RFC 6570 URI templates for notes/folders not present in resources/list.
+
+        discover_resources() returns folders only; clients (or tools that already
+        know a path) build note URIs via this template without a full-vault walk.
+        """
         return [
             MCPResourceTemplate(
                 uriTemplate=f"{self.uri_scheme}://{self.uri_authority}/{{+path}}",
@@ -221,8 +202,8 @@ class ObsidianResources:
                     "A note (text/markdown) or folder (application/json listing) "
                     "at a vault-relative path, e.g. work/entities/customer/gojob.md. "
                     "Same paths tools use, prefixed with the workspace (personal/"
-                    "passion/work). Not scope-filtered by API key - prefer tools "
-                    "when the connection is scope-restricted."
+                    "passion/work). Prefer this (or scoped tools) over expecting "
+                    "every note in resources/list. Not scope-filtered by API key."
                 ),
             )
         ]
