@@ -34,8 +34,14 @@ def _ui_meta(resource_uri: str, visibility: Optional[List[str]] = None) -> Dict[
     return meta
 
 
-def _resource_meta() -> Dict[str, Any]:
-    return {"ui": {"csp": dict(DEFAULT_UI_CSP)}}
+def _resource_meta(resource_uri: str) -> Dict[str, Any]:
+    """UI resource _meta.
+
+    resourceUri is echoed back alongside the CSP because Claude requires it on
+    resources/list and resources/read to render the app; without it the host
+    mounts an empty widget frame.
+    """
+    return {"ui": {"resourceUri": resource_uri, "csp": dict(DEFAULT_UI_CSP)}}
 
 
 def list_ui_app_resources() -> List[MCPResource]:
@@ -45,13 +51,14 @@ def list_ui_app_resources() -> List[MCPResource]:
         path = dist_html_path(app_name)
         if not path.is_file():
             continue
+        uri = ui_uri(app_name)
         resources.append(
             MCPResource(
-                uri=ui_uri(app_name),
+                uri=uri,
                 name=label,
                 description=f"Ziksaka MCP App · {label}",
                 mimeType=UI_MIME_TYPE,
-                meta=_resource_meta(),
+                meta=_resource_meta(uri),
             )
         )
     return resources
@@ -65,7 +72,8 @@ def read_ui_app_resource(uri: str) -> Dict[str, Any]:
     resolving the bundle on disk; any version of a known app reads the current
     file.
 
-    Returns dict with keys: uri, mimeType, text, metadata (_meta.ui.csp).
+    Returns dict with keys: uri, mimeType, text, metadata
+    (_meta.ui.resourceUri + _meta.ui.csp).
     Raises ValueError if unknown or missing on disk.
     """
     app_name, _version = split_ui_uri(uri)
@@ -82,7 +90,7 @@ def read_ui_app_resource(uri: str) -> Dict[str, Any]:
         "uri": uri,
         "mimeType": UI_MIME_TYPE,
         "text": text,
-        "metadata": _resource_meta(),
+        "metadata": _resource_meta(uri),
     }
 
 

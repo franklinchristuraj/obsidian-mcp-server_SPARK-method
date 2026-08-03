@@ -65,13 +65,17 @@ class TestMcpAppsTransport(unittest.IsolatedAsyncioTestCase):
         for r in resources:
             self.assertEqual(r.mimeType, "text/html;profile=mcp-app")
             self.assertIn("ui", (r.meta or {}))
+            # Claude needs resourceUri echoed on the resource, not just the tool.
+            self.assertEqual((r.meta or {})["ui"]["resourceUri"], r.uri)
             # Every advertised URI carries a cache-busting version.
             self.assertIsNotNone(split_ui_uri(r.uri)[1])
 
-        content = read_ui_app_resource(path_ui_uri("smoke"))
+        uri = path_ui_uri("smoke")
+        content = read_ui_app_resource(uri)
         self.assertIn("<!DOCTYPE html>", content["text"])
         self.assertEqual(content["mimeType"], "text/html;profile=mcp-app")
         self.assertIn("csp", content["metadata"]["ui"])
+        self.assertEqual(content["metadata"]["ui"]["resourceUri"], uri)
 
     async def test_read_accepts_unversioned_and_stale_versions(self) -> None:
         """Version is cache-busting only; it must not gate reads."""

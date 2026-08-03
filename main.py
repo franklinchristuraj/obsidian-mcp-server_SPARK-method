@@ -498,8 +498,10 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
 
             # Handle notifications (which return None and should not send a response)
             if method.startswith("notifications/") and result is None:
-                # For MCP notifications, return a 204 No Content response
-                return JSONResponse(content=None, status_code=204)
+                # Streamable HTTP: notification-only input gets 202 Accepted with
+                # no body. JSONResponse(None) would emit a 4-byte "null" body that
+                # contradicts the empty-body status and aborts the ASGI response.
+                return Response(status_code=202)
 
             response = create_jsonrpc_response(result=result, request_id=request_id)
 
