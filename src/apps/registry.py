@@ -6,7 +6,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.types import MCPResource, MCPTool
 
-from .paths import DEFAULT_UI_CSP, UI_MIME_TYPE, dist_html_path, ui_uri
+from .paths import (
+    DEFAULT_UI_CSP,
+    UI_MIME_TYPE,
+    dist_html_path,
+    split_ui_uri,
+    ui_uri,
+)
 
 Handler = Callable[..., Awaitable[Dict[str, Any]]]
 
@@ -53,15 +59,16 @@ def list_ui_app_resources() -> List[MCPResource]:
 
 def read_ui_app_resource(uri: str) -> Dict[str, Any]:
     """
-    Read a ui://ziksaka/{app} HTML bundle.
+    Read a ui://ziksaka/{app}[@version] HTML bundle.
+
+    The version suffix is a cache-busting content hash, so it is ignored when
+    resolving the bundle on disk; any version of a known app reads the current
+    file.
 
     Returns dict with keys: uri, mimeType, text, metadata (_meta.ui.csp).
     Raises ValueError if unknown or missing on disk.
     """
-    expected_prefix = "ui://ziksaka/"
-    if not uri.startswith(expected_prefix):
-        raise ValueError(f"Not a Ziksaka UI resource: {uri}")
-    app_name = uri[len(expected_prefix) :].strip("/")
+    app_name, _version = split_ui_uri(uri)
     if app_name not in _UI_APPS:
         raise ValueError(f"No MCP App UI registered for {uri}")
     path = dist_html_path(app_name)

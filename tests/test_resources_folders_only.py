@@ -141,9 +141,11 @@ class TestResourcesWorkspaceRoots(unittest.IsolatedAsyncioTestCase):
         self.assertIn("obsidian://notes/work/entities/{type}/{slug}.md", uris)
 
     def test_ui_registry_lists_bundles(self) -> None:
+        from src.apps.paths import split_ui_uri
+
         resources = self.resources.list_ui_resources()
-        uris = {r.uri for r in resources}
-        self.assertIn("ui://ziksaka/smoke", uris)
+        apps = {split_ui_uri(r.uri)[0] for r in resources}
+        self.assertIn("smoke", apps)
         self.assertEqual(
             self.resources.build_ui_uri("impact/rollup"),
             "ui://ziksaka/impact/rollup",
