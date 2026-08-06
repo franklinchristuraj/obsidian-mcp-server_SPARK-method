@@ -49,6 +49,11 @@ workspace_keys.json
 # Token database (live SQLite — never commit)
 tokens.db
 
+# Tool-call observability database (live SQLite — never commit)
+observability.db
+observability.db-wal
+observability.db-shm
+
 # Virtual environment
 .venv/
 

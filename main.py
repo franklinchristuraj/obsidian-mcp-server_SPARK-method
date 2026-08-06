@@ -9,11 +9,13 @@ import os
 import json
 import asyncio
 import time
+import uuid
 from typing import Dict, Any, Optional, AsyncGenerator
 from src.auth import verify_api_key
 from src.scope import workspace_ctx
 from src.mcp_server import mcp_handler, MCPProtocolHandler
 from src.token_store import TokenStore, generate_token, verify_pkce
+from src import observability
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +35,8 @@ app = FastAPI(
 async def startup():
     await token_store.init_db()
     asyncio.create_task(_periodic_cleanup())
+    await observability.init_observability()
+    asyncio.create_task(observability.run_background_writer())
 
 
 async def _periodic_cleanup():
@@ -456,6 +460,45 @@ async def mcp_sse_endpoint(request: Request, _auth=Depends(verify_api_key)):
     )
 
 
+def _log_tools_call(
+    session_id: str,
+    client: str,
+    params: Optional[Dict[str, Any]],
+    result: Any,
+    start: float,
+    status: str,
+    error: Optional[str],
+) -> None:
+    """Best-effort tool-call logging around the tools/call boundary. Never
+    raises — wraps observability.log_tool_call, which itself never raises,
+    plus the result-inspection logic that can (e.g. non-serializable data)."""
+    try:
+        tool_name = (params or {}).get("name", "unknown")
+        args = (params or {}).get("arguments", {}) or {}
+        if isinstance(result, dict) and result.get("isError"):
+            status = "error"
+            if error is None:
+                content = result.get("content") or []
+                if content and isinstance(content[0], dict):
+                    error = content[0].get("text")
+        try:
+            response_bytes = len(json.dumps(result, default=str).encode("utf-8"))
+        except Exception:
+            response_bytes = 0
+        observability.log_tool_call(
+            session_id=session_id,
+            client=client,
+            tool_name=tool_name,
+            args=args,
+            status=status,
+            error=error,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            response_bytes=response_bytes,
+        )
+    except Exception:
+        pass
+
+
 @app.post("/mcp")
 async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
     """
@@ -491,17 +534,50 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
         accept_header = request.headers.get("accept", "")
         wants_streaming = "text/event-stream" in accept_header
 
+        # Session correlation: this server has no native MCP session id, so
+        # mint one on initialize and expect the client to echo it back via
+        # the Mcp-Session-Id header on every later call (Streamable HTTP
+        # spec behavior — no client-side change needed for compliant
+        # clients). Non-compliant/unknown clients fall back to a coarse
+        # time-window bucket keyed by API-key identity.
+        incoming_session_id = request.headers.get("mcp-session-id")
+        if method == "initialize":
+            session_id = incoming_session_id or str(uuid.uuid4())
+        else:
+            session_id = incoming_session_id or observability.fallback_session_id(
+                auth.identity
+            )
+        obs_client = observability.resolve_client(session_id)
+
         ctx_token = workspace_ctx.set(auth)
+        obs_token = observability.call_context.set(
+            observability.CallContext(session_id=session_id, client=obs_client)
+        )
+        tool_call_start = time.monotonic()
         try:
             # Use the new MCP protocol handler (tools read workspace_ctx)
             result = await mcp_handler.handle_request(method, params)
+
+            if method == "initialize" and isinstance(params, dict):
+                client_info = params.get("clientInfo") or {}
+                observability.register_session_client(
+                    session_id, client_info.get("name")
+                )
+
+            if method == "tools/call":
+                _log_tools_call(
+                    session_id, obs_client, params, result, tool_call_start,
+                    status="ok", error=None,
+                )
 
             # Handle notifications (which return None and should not send a response)
             if method.startswith("notifications/") and result is None:
                 # Streamable HTTP: notification-only input gets 202 Accepted with
                 # no body. JSONResponse(None) would emit a 4-byte "null" body that
                 # contradicts the empty-body status and aborts the ASGI response.
-                return Response(status_code=202)
+                return Response(
+                    status_code=202, headers={"Mcp-Session-Id": session_id}
+                )
 
             response = create_jsonrpc_response(result=result, request_id=request_id)
 
@@ -518,26 +594,42 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
                         "Connection": "keep-alive",
                         "Access-Control-Allow-Origin": "*",
                         "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                        "Mcp-Session-Id": session_id,
                     },
                 )
             else:
                 # Return regular JSON response
-                return JSONResponse(content=response)
+                return JSONResponse(
+                    content=response, headers={"Mcp-Session-Id": session_id}
+                )
 
         except ValueError as e:
             # Method not found
+            if method == "tools/call":
+                _log_tools_call(
+                    session_id, obs_client, params, None, tool_call_start,
+                    status="error", error=str(e),
+                )
             return JSONResponse(
                 content=create_jsonrpc_error("METHOD_NOT_FOUND", str(e), request_id),
                 status_code=404,
+                headers={"Mcp-Session-Id": session_id},
             )
         except Exception as e:
             # Internal error
+            if method == "tools/call":
+                _log_tools_call(
+                    session_id, obs_client, params, None, tool_call_start,
+                    status="error", error=str(e),
+                )
             return JSONResponse(
                 content=create_jsonrpc_error("INTERNAL_ERROR", str(e), request_id),
                 status_code=500,
+                headers={"Mcp-Session-Id": session_id},
             )
         finally:
             workspace_ctx.reset(ctx_token)
+            observability.call_context.reset(obs_token)
 
     except Exception as e:
         # Catch-all for unexpected errors
