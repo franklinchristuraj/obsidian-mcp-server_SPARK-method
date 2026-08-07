@@ -15,10 +15,12 @@ fall back to a coarse time-window bucket keyed by API-key identity.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -34,8 +36,12 @@ _queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
 _dropped_count = 0
 
 # session_id -> classified client ("Desktop" | "Code" | "n8n" | "unknown"),
-# populated from clientInfo.name on `initialize`.
-_session_clients: Dict[str, str] = {}
+# populated from clientInfo.name on `initialize`. Bounded and LRU-evicted:
+# every `initialize` mints a new id, so an unbounded dict grows for the life
+# of the process and lets any authenticated client exhaust memory by
+# reconnecting in a loop.
+_SESSION_CLIENTS_MAX = 10_000
+_session_clients: "OrderedDict[str, str]" = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -62,10 +68,19 @@ def _classify_client(raw_name: Optional[str]) -> str:
 
 def register_session_client(session_id: str, raw_client_name: Optional[str]) -> None:
     _session_clients[session_id] = _classify_client(raw_client_name)
+    _session_clients.move_to_end(session_id)
+    while len(_session_clients) > _SESSION_CLIENTS_MAX:
+        _session_clients.popitem(last=False)
 
 
 def resolve_client(session_id: str) -> str:
-    return _session_clients.get(session_id, "unknown")
+    client = _session_clients.get(session_id)
+    if client is None:
+        return "unknown"
+    # Touch on read so a long-running conversation isn't evicted by a burst
+    # of short-lived ones.
+    _session_clients.move_to_end(session_id)
+    return client
 
 
 def fallback_session_id(identity: str) -> str:
@@ -74,12 +89,23 @@ def fallback_session_id(identity: str) -> str:
     Materially worse than a real session id (PRD §6) — over-call detection
     degrades since concurrent/overlapping conversations from the same key
     collapse into one bucket.
+
+    Identity is hashed, not embedded: the fallback id is returned in the
+    Mcp-Session-Id response header (and thus nginx access logs) and written
+    to observability.db. Auth identities include truncated API-key prefixes
+    and a U+2026 ellipsis that is not latin-1 encodable for HTTP headers.
     """
     bucket = int(time.time() // SESSION_FALLBACK_WINDOW_SECONDS)
-    return f"noid:{identity}:{bucket}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"noid:{digest}:{bucket}"
 
 
-def _redact(args: Dict[str, Any]) -> Dict[str, Any]:
+def _redact(args: Any) -> Any:
+    # `arguments` is client-supplied and need not be an object. Record the
+    # shape of a malformed one rather than raising, which would drop the
+    # record for exactly the misbehaving call worth keeping.
+    if not isinstance(args, dict):
+        return args if not REDACT_ARGS else type(args).__name__
     if not REDACT_ARGS:
         return args
     return {k: type(v).__name__ for k, v in args.items()}
@@ -90,7 +116,7 @@ def log_tool_call(
     session_id: str,
     client: str,
     tool_name: str,
-    args: Dict[str, Any],
+    args: Any,
     status: str,
     error: Optional[str],
     latency_ms: int,
