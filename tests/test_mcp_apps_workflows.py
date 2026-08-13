@@ -19,7 +19,7 @@ from src.tools.obsidian_tools import ObsidianTools
 class TestTriagePromoteArchive(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.vault = Path(tempfile.mkdtemp(prefix="ziksaka-triage-"))
-        for scope in ("personal", "passion", "work"):
+        for scope in ("personal", "passion", "work", "parallax"):
             (self.vault / scope).mkdir()
         seeds = self.vault / "01_seeds"
         seeds.mkdir()
@@ -46,7 +46,7 @@ class TestTriagePromoteArchive(unittest.IsolatedAsyncioTestCase):
         self._ctx = workspace_ctx.set(
             WorkspaceContext(
                 identity="test",
-                allowed_scopes=("personal", "passion", "work"),
+                allowed_scopes=("personal", "passion", "work", "parallax"),
                 role="admin",
             )
         )

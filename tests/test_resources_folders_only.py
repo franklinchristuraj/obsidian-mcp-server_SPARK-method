@@ -15,7 +15,7 @@ from src.scope import WorkspaceContext, workspace_ctx
 
 def _make_tmp_vault() -> str:
     root = Path(tempfile.mkdtemp(prefix="obsidian-resources-test-"))
-    for scope in ("personal", "passion", "work"):
+    for scope in ("personal", "passion", "work", "parallax"):
         (root / scope).mkdir()
     daily = root / "personal" / "06_daily-notes"
     daily.mkdir(parents=True)
@@ -44,7 +44,7 @@ class TestResourcesWorkspaceRoots(unittest.IsolatedAsyncioTestCase):
         self._ctx_token = workspace_ctx.set(
             WorkspaceContext(
                 identity="test-all",
-                allowed_scopes=("personal", "passion", "work"),
+                allowed_scopes=("personal", "passion", "work", "parallax"),
                 role="admin",
             )
         )
@@ -58,7 +58,7 @@ class TestResourcesWorkspaceRoots(unittest.IsolatedAsyncioTestCase):
         uris = [r.uri for r in discovered]
 
         self.assertIn("obsidian://notes/", uris)
-        for scope in ("personal", "passion", "work"):
+        for scope in ("personal", "passion", "work", "parallax"):
             self.assertIn(f"obsidian://notes/{scope}/", uris)
         for pin in CURATED_ROOT_PINS:
             self.assertIn(f"obsidian://notes/{pin}", uris)
@@ -76,7 +76,7 @@ class TestResourcesWorkspaceRoots(unittest.IsolatedAsyncioTestCase):
             msg="entity notes must not appear in resources/list",
         )
         ui_count = sum(1 for u in uris if u.startswith("ui://"))
-        self.assertEqual(len(discovered), 1 + 3 + 3 + ui_count)  # root + workspaces + pins + UI
+        self.assertEqual(len(discovered), 1 + 4 + 3 + ui_count)  # root + workspaces + pins + UI
         self.assertGreaterEqual(ui_count, 1)
 
     async def test_discover_respects_work_only_scope(self) -> None:

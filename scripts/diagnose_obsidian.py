@@ -49,7 +49,7 @@ def main():
         print(f"❌ Vault path does not exist: {vault_path}")
     else:
         print(f"✅ Vault path readable: {vault_path}")
-        for scope in ("personal", "passion", "work"):
+        for scope in ("personal", "passion", "work", "parallax"):
             scope_dir = Path(vault_path) / scope
             count = len(list(scope_dir.rglob("*.md"))) if scope_dir.is_dir() else 0
             status = "✅" if scope_dir.is_dir() else "❌"

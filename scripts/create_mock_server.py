@@ -2,7 +2,7 @@
 """
 Mock Filesystem Vault for Testing
 
-Creates a disposable tmp-filesystem vault (personal/passion/work scope
+Creates a disposable tmp-filesystem vault (personal/passion/work/parallax scope
 folders + a few sample notes) and prints its path so you can point
 OBSIDIAN_VAULT_PATH at it. Replaces the old mock Obsidian REST API server -
 there's no REST API to mock anymore, just a directory tree.
@@ -28,7 +28,7 @@ MOCK_NOTES = {
 
 def create_mock_vault() -> str:
     root = Path(tempfile.mkdtemp(prefix="obsidian-mock-vault-"))
-    for scope in ("personal", "passion", "work"):
+    for scope in ("personal", "passion", "work", "parallax"):
         (root / scope).mkdir()
     for rel_path, content in MOCK_NOTES.items():
         full = root / rel_path

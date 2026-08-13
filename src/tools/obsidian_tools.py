@@ -858,7 +858,7 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
 def _scope_schema_read() -> Dict[str, Any]:
     return {
         "type": "string",
-        "enum": ["personal", "passion", "work"],
+        "enum": ["personal", "passion", "work", "parallax"],
         "description": (
             "Workspace folder. Omit to include all workspaces allowed for this API key; "
             "set to narrow reads to one workspace."
@@ -869,7 +869,7 @@ def _scope_schema_read() -> Dict[str, Any]:
 def _scope_schema_write() -> Dict[str, Any]:
     return {
         "type": "string",
-        "enum": ["personal", "passion", "work"],
+        "enum": ["personal", "passion", "work", "parallax"],
         "description": (
             "Target workspace. Required when this key can access more than one workspace."
         ),
@@ -1008,7 +1008,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "type": "string",
                 "description": (
                     "Path relative to the workspace (e.g. '06_daily-notes/2026-04-11.md'). "
-                    "Do not prefix with personal/passion/work — use scope instead."
+                    "Do not prefix with personal/passion/work/parallax — use scope instead."
                 ),
             },
             "content": {
@@ -1073,7 +1073,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         read_path_prop = {
             "path": {
                 "type": "string",
-                "description": "Note path relative to workspace (no personal/passion/work prefix)",
+                "description": "Note path relative to workspace (no personal/passion/work/parallax prefix)",
             },
             "scope": sr,
         }
@@ -3494,6 +3494,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             write_scope = resolve_write_scope(scope, allow)
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
+        if write_scope != "work":
+            raise ValueError(
+                "create_event only supports scope='work' "
+                f"(got '{write_scope}'; refuses writing event entities outside work/)"
+            )
 
         base = f"entities/event/{event_date}-{fn_slug}-{type_for_name}"
         rel = f"{base}.md"
@@ -3811,6 +3816,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             write_scope = resolve_write_scope(scope, allow)
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
+        if write_scope != "work":
+            raise ValueError(
+                "create_engagement only supports scope='work' "
+                f"(got '{write_scope}'; refuses writing engagements outside work/)"
+            )
 
         full = resolve_scoped_path(rel, write_scope, allow)
         if await self.client.note_exists(full):

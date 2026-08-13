@@ -732,6 +732,28 @@ class TestCreateEventTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.tools.create_event(event_type="lunch", scope="work")
 
+    async def test_create_event_rejects_parallax_scope(self) -> None:
+        from src.scope import WorkspaceContext, workspace_ctx
+
+        token = workspace_ctx.set(
+            WorkspaceContext(
+                identity="admin",
+                allowed_scopes=("personal", "passion", "work", "parallax"),
+                role="admin",
+            )
+        )
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                await self.tools.create_event(
+                    event_type="discovery-call",
+                    event_date="2026-06-01",
+                    customer="Claroty",
+                    scope="parallax",
+                )
+            self.assertIn("scope='work'", str(ctx.exception))
+        finally:
+            workspace_ctx.reset(token)
+
     async def test_filename_collision_suffix(self) -> None:
         for _ in range(2):
             await self.tools.create_event(

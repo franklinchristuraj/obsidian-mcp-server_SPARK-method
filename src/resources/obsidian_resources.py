@@ -178,14 +178,14 @@ class ObsidianResources:
                 name="Vault note or folder",
                 description=(
                     "Any vault-relative note or folder, e.g. work/entities/customer/gojob.md. "
-                    "Prefixed with workspace (personal/passion/work). Scope-filtered on read."
+                    "Prefixed with workspace (personal/passion/work/parallax). Scope-filtered on read."
                 ),
             ),
             MCPResourceTemplate(
                 uriTemplate=f"{base}/{{scope}}/06_daily-notes/{{date}}.md",
                 name="Daily note",
                 description=(
-                    "Daily journal note. scope=personal|passion|work; date=YYYY-MM-DD. "
+                    "Daily journal note. scope=personal|passion|work|parallax; date=YYYY-MM-DD. "
                     "Prefer list_journal / read_note tools when scripting."
                 ),
             ),

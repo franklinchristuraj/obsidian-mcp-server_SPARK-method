@@ -30,7 +30,9 @@ class TriageBoardPayload(BaseModel):
     counts: TriageCounts
     oldest_days: Optional[int] = None
     items: List[TriageItem] = Field(default_factory=list)
-    scopes: List[str] = Field(default_factory=lambda: ["personal", "passion", "work"])
+    scopes: List[str] = Field(
+        default_factory=lambda: ["personal", "passion", "work", "parallax"]
+    )
     target_types: List[str] = Field(
         default_factory=lambda: ["seed", "resource", "knowledge"]
     )

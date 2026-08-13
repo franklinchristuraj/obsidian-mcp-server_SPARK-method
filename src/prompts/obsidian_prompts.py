@@ -27,7 +27,7 @@ class ObsidianPrompts:
                 name="note_template_system",
                 description=(
                     "SPARK-style folders and YAML templates; paths are under a workspace "
-                    "(personal/passion/work) when using MCP tools—pair with vault_mcp_agent_guide."
+                    "(personal/passion/work/parallax) when using MCP tools—pair with vault_mcp_agent_guide."
                 ),
                 arguments=[
                     {
@@ -73,7 +73,8 @@ class ObsidianPrompts:
             MCPPrompt(
                 name="area_note_template",
                 description=(
-                    "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work) from context."
+                    "Area note YAML under 03_areas/; choose MCP scope "
+                    "(personal/passion/work/parallax) from context."
                 ),
                 arguments=[
                     {
@@ -139,7 +140,7 @@ class ObsidianPrompts:
         """Single source of truth for agents using workspace-scoped MCP tools."""
         return """# Vault workspaces and MCP tools (agent guide)
 
-## 1. Three workspaces
+## 1. Four workspaces
 
 The vault is split into top-level folders (scopes):
 
@@ -148,12 +149,13 @@ The vault is split into top-level folders (scopes):
 | `personal` | Journal, family, finances, health, trips, people |
 | `passion` | Research, side projects, content, learning, blueprints |
 | `work` | Employer projects, meetings, stakeholders, OKRs, **entity graph** |
+| `parallax` | Frontier product build: charter, decisions, discovery, opaque org codes |
 
-Each scope has its own `00_system/templates/`, `01_seeds/`, `02_projects/`, etc. Same relative path in two scopes is **two different notes**.
+Each of personal/passion/work has its own SPARK folders (`00_system/templates/`, `01_seeds/`, …). `parallax` is deliberately sparse (charter, decisions, discovery, conversations, `entities/org/`). Same relative path in two scopes is **two different notes**.
 
 ## 2. Start with `workspaces`
 
-Call the **`workspaces`** tool once per session (or when unsure). It returns which scopes this **API key** may use. Do not assume access to all three.
+Call the **`workspaces`** tool once per session (or when unsure). It returns which scopes this **API key** may use. Do not assume access to all four.
 
 **Recommended session start:** `workspaces` → load this guide (or vault `AGENTS.md`) → `ping` for health. For entity questions, go straight to vault intelligence tools — not search+read loops.
 
@@ -161,7 +163,7 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns whi
 
 - **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`.
 - **Work meeting notes** use **`scope=work`** and paths under **`11_work-meeting-notes/`** (aligned with meeting templates in `template_utils`).
-- **Never** put `personal/`, `passion/`, or `work/` as the first segment of `path`. Use the **`scope`** parameter instead.
+- **Never** put `personal/`, `passion/`, `work/`, or `parallax/` as the first segment of `path`. Use the **`scope`** parameter instead.
 - **Reads** (search, list, vault intelligence, read): optional `scope`. Omit to include all scopes allowed for this key; set it to narrow to one workspace.
 - **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`): if the key has **more than one** allowed scope, **`scope` is required**. If the key has exactly one scope, it is auto-selected.
 
@@ -298,7 +300,7 @@ Use only registered tool names (legacy `obs_*` names are not available).
 
 ## 6. MCP resources vs tools
 
-- **`resources/list`** returns a **tiny curated set**: vault root, allowed workspace roots (`personal/` / `passion/` / `work/`), and root pins if present (`AGENTS.md`, `index.md`, `CLAUDE.md`). It does **not** enumerate daily notes, entities, meetings, or deep folders.
+- **`resources/list`** returns a **tiny curated set**: vault root, allowed workspace roots (`personal/` / `passion/` / `work/` / `parallax/`), and root pins if present (`AGENTS.md`, `index.md`, `CLAUDE.md`). It does **not** enumerate daily notes, entities, meetings, or deep folders.
 - **`resources/read`** still works for deep note/folder URIs (`obsidian://notes/personal/06_daily-notes/2026-04-11.md`). Prefer templates:
   - `obsidian://notes/{+path}`
   - `obsidian://notes/{scope}/06_daily-notes/{date}.md`
@@ -332,7 +334,7 @@ For a whole work meeting (brief before, log after), load **`meeting_prep_workflo
 
 ## MCP tools and workspace paths
 
-When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. The same folder names below exist **inside each** of `personal/`, `passion/`, and `work/` on disk.
+When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. SPARK folder names below exist inside `personal/`, `passion/`, and `work/` on disk; `parallax/` uses a sparse layout (see vault `parallax/CLAUDE.md`).
 
 For **tool choice, scope rules, and resources vs tools**, load the **`vault_mcp_agent_guide`** prompt first.
 
@@ -592,7 +594,7 @@ Use this template for area notes in the `03_areas/` folder inside a workspace.
 
 ## File Structure
 - **Filename**: `{name_placeholder.lower().replace(' ', '-')}.md`
-- **MCP path**: `03_areas/<filename>.md` with appropriate `scope` (personal vs passion vs work).
+- **MCP path**: `03_areas/<filename>.md` with appropriate `scope` (personal / passion / work / parallax).
 - **On disk**: `<scope>/03_areas/...` (scope is the workspace you pass)
 
 ## Template:

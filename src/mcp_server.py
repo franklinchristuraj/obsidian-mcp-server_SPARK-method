@@ -16,7 +16,7 @@ _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     ),
     "note_template_system": (
         "SPARK-style folders and YAML templates; paths are under a workspace "
-        "(personal/passion/work) when using MCP tools—pair with vault_mcp_agent_guide."
+        "(personal/passion/work/parallax) when using MCP tools—pair with vault_mcp_agent_guide."
     ),
     "daily_note_template": (
         "Daily note YAML and sections; MCP path is e.g. 06_daily-notes/YYYY-MM-DD.md "
@@ -26,7 +26,8 @@ _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
         "Project note YAML under 02_projects/; set MCP scope to the workspace that owns the project."
     ),
     "area_note_template": (
-        "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work) from context."
+        "Area note YAML under 03_areas/; choose MCP scope "
+        "(personal/passion/work/parallax) from context."
     ),
     "format_preservation_rules": (
         "YAML and structure preservation when editing via MCP; paths remain workspace-relative."
@@ -58,7 +59,8 @@ class MCPProtocolHandler:
             "name": "obsidian-mcp-server",
             "version": "2.1.0",
             "description": (
-                "Obsidian MCP server (v2.1.0): workspace-scoped CRUD (personal / passion / work), "
+                "Obsidian MCP server (v2.1.0): workspace-scoped CRUD "
+                "(personal / passion / work / parallax), "
                 "vault intelligence, capture inbox, create_event/create_engagement, impact snapshots, "
                 "and MCP Apps (prep_card, lint_queue, snapshot_grid, debrief_form, triage_board, "
                 "promote_capture). Load MCP prompt vault_mcp_agent_guide first."
@@ -67,7 +69,7 @@ class MCPProtocolHandler:
         self.instructions = (
             "Obsidian vault MCP server. Before doing vault work, fetch the "
             "'vault_mcp_agent_guide' prompt (prompts/get) - it covers workspaces "
-            "(personal/passion/work), the entity graph tools (resolve_entity, "
+            "(personal/passion/work/parallax), the entity graph tools (resolve_entity, "
             "get_dossier, build_context, graph/timeline tools), and path/scope "
             "conventions. Call 'workspaces' first to see which scopes this API "
             "key can access."

@@ -2,7 +2,7 @@
   "keys": {
     "sk_admin_REPLACE_ME": {
       "name": "Admin",
-      "scopes": ["personal", "passion", "work"],
+      "scopes": ["personal", "passion", "work", "parallax"],
       "role": "admin"
     },
     "sk_personal_REPLACE_ME": {
@@ -19,7 +19,7 @@
   "oauth_clients": {
     "paste-oauth-client-id-here": {
       "name": "Claude web client",
-      "scopes": ["personal", "passion", "work"],
+      "scopes": ["personal", "passion", "work", "parallax"],
       "role": "user"
     }
   }

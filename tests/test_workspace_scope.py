@@ -72,6 +72,22 @@ class TestScopeHelpers(unittest.TestCase):
             "passion/03_areas",
         )
 
+    def test_parallax_is_known_scope(self) -> None:
+        self.assertEqual(
+            resolve_scoped_path("charter.md", "parallax", ("personal", "parallax")),
+            "parallax/charter.md",
+        )
+        self.assertEqual(
+            active_scopes_for_read("parallax", ("personal", "passion", "work", "parallax")),
+            ["parallax"],
+        )
+        with self.assertRaises(PermissionError):
+            resolve_scoped_path("charter.md", "parallax", ("personal", "work"))
+
+    def test_forbid_parallax_prefix(self) -> None:
+        with self.assertRaises(ValueError):
+            forbid_scope_prefix_in_agent_path("parallax/charter.md")
+
 
 class TestWorkspaceKeysAuth(unittest.TestCase):
     def setUp(self) -> None:

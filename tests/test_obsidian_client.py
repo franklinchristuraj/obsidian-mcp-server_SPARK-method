@@ -16,7 +16,7 @@ from src.clients.obsidian_client import ObsidianClient, ObsidianAPIError
 
 def _make_tmp_vault() -> str:
     root = Path(tempfile.mkdtemp(prefix="obsidian-client-test-"))
-    for scope in ("personal", "passion", "work"):
+    for scope in ("personal", "passion", "work", "parallax"):
         (root / scope).mkdir()
     return str(root)
 
