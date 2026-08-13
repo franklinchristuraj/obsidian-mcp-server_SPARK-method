@@ -22,10 +22,34 @@ PY="$VENV/bin/python"
 PID_FILE="$ROOT/.dev-server.pid"
 LOG_FILE="$ROOT/dev-server.log"
 
-# Resolve the port the server will actually bind to: explicit env wins, then
-# MCP_PORT from .env (which main_production.py loads), then the app default.
-env_port="$(grep -E '^MCP_PORT=' "$ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
-PORT="${MCP_PORT:-${env_port:-8888}}"
+# Resolve the port the server will actually bind to, mirroring
+# main_production.py's precedence: exported env wins, then .env.production,
+# then .env. No default — a guessed port would make every command here
+# (status, stop, the port_pid guard) silently target the wrong listener.
+env_file_port() {
+  [ -f "$1" ] || return 1
+  local v
+  v="$(grep -E '^[[:space:]]*MCP_PORT=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- \
+       | tr -d '"'"'"'[:space:]')"
+  [ -n "$v" ] && echo "$v"
+}
+
+PORT="${MCP_PORT:-$(env_file_port "$ROOT/.env.production" || env_file_port "$ROOT/.env" || true)}"
+
+# Validated lazily rather than at load time: `setup` is what creates .env in
+# the first place, so a hard check here would deadlock a fresh clone against
+# an error message telling it to run `setup`.
+require_port() {
+  if [ -z "${PORT:-}" ]; then
+    echo "❌ MCP_PORT is not set in the environment, $ROOT/.env.production, or $ROOT/.env." >&2
+    echo "   Refusing to guess a port. Run 'scripts/dev-server.sh setup' or copy .env.example (MCP_PORT=8000)." >&2
+    exit 1
+  fi
+  if ! [ "$PORT" -eq "$PORT" ] 2>/dev/null; then
+    echo "❌ MCP_PORT must be an integer, got '$PORT'." >&2
+    exit 1
+  fi
+}
 
 is_running() {
   [ -f "$PID_FILE" ] || return 1
@@ -116,10 +140,10 @@ status() {
 
 case "${1:-}" in
   setup)   setup ;;
-  start)   start ;;
-  stop)    stop ;;
-  restart) stop; start ;;
-  status)  status ;;
+  start)   require_port; start ;;
+  stop)    require_port; stop ;;
+  restart) require_port; stop; start ;;
+  status)  require_port; status ;;
   logs)    tail -n 50 -f "$LOG_FILE" ;;
   *) echo "Usage: $0 {setup|start|stop|restart|status|logs}" >&2; exit 1 ;;
 esac
