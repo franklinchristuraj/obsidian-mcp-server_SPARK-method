@@ -3,9 +3,10 @@ Authentication Middleware
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from fastapi import Header, HTTPException, Request, status
 
@@ -17,6 +18,16 @@ from src.scope import (
 
 
 _workspace_config_cache: Optional[Dict[str, Any]] = None
+
+_SENSITIVE_HEADERS = {"authorization", "x-api-key", "cookie", "set-cookie"}
+
+
+def redact_sensitive_headers(headers: Mapping[str, str]) -> Dict[str, str]:
+    """Return a copy of request headers safe to print/log (credentials masked)."""
+    return {
+        k: ("***redacted***" if k.lower() in _SENSITIVE_HEADERS else v)
+        for k, v in headers.items()
+    }
 
 
 def _load_workspace_config() -> Dict[str, Any]:
@@ -117,14 +128,14 @@ async def verify_api_key(
     if not token:
         print(
             f"🔐 AUTH FAIL [no token] UA={request.headers.get('user-agent', '?')} "
-            f"headers={dict(request.headers)}"
+            f"headers={redact_sensitive_headers(request.headers)}"
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header or api_key parameter",
         )
 
-    print(f"🔐 AUTH token={token[:20]}... UA={request.headers.get('user-agent', '?')}")
+    print(f"🔐 AUTH request UA={request.headers.get('user-agent', '?')}")
     config = _load_workspace_config()
     keys = config.get("keys") or {}
     oauth_clients = config.get("oauth_clients") or {}
@@ -135,7 +146,7 @@ async def verify_api_key(
         return _entry_to_context(f"key:{token[:12]}...", keys[token])
 
     expected_key = os.getenv("MCP_API_KEY")
-    if expected_key and token == expected_key:
+    if expected_key and hmac.compare_digest(token, expected_key):
         if expected_key in keys and isinstance(keys[expected_key], dict):
             return _entry_to_context("static-api-key", keys[expected_key])
         return WorkspaceContext(

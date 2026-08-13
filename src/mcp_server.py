@@ -32,6 +32,10 @@ _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     "format_preservation_rules": (
         "YAML and structure preservation when editing via MCP; paths remain workspace-relative."
     ),
+    "meeting_prep_workflow": (
+        "Step-by-step workflow for prepping a meeting from an entity_name: pulls dossier, "
+        "recent engagement, and open threads via the graph tools before the call."
+    ),
 }
 
 

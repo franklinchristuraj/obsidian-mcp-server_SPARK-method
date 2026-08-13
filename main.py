@@ -11,7 +11,7 @@ import asyncio
 import time
 import uuid
 from typing import Dict, Any, Optional, AsyncGenerator
-from src.auth import verify_api_key
+from src.auth import verify_api_key, redact_sensitive_headers
 from src.scope import workspace_ctx
 from src.mcp_server import mcp_handler, MCPProtocolHandler
 from src.token_store import TokenStore, generate_token, verify_pkce
@@ -424,7 +424,7 @@ async def create_sse_stream(
 
 
 @app.get("/mcp/debug")
-async def debug_endpoint():
+async def debug_endpoint(_auth=Depends(verify_api_key)):
     return {
         "status": "Server is running",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -524,7 +524,7 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
         print(
             f"📥 MCP Request from {request.client.host if request.client else 'unknown'}"
         )
-        print(f"📋 Headers: {dict(request.headers)}")
+        print(f"📋 Headers: {redact_sensitive_headers(request.headers)}")
         print(f"📄 Body: {body.decode()}")
         try:
             request_data = json.loads(body.decode())
