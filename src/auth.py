@@ -47,12 +47,37 @@ def _normalize_scopes(raw: Any) -> Tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+def _normalize_write_scopes(
+    raw: Any, read_scopes: Tuple[str, ...]
+) -> Tuple[str, ...]:
+    """
+    Optional write_scopes on a key entry.
+    When omitted, writes use the same list as reads.
+    Every write scope must be a known scope and a subset of read scopes.
+    """
+    if raw is None:
+        return read_scopes
+    if not isinstance(raw, list):
+        return read_scopes
+    out = [
+        str(s)
+        for s in raw
+        if str(s) in KNOWN_SCOPES and str(s) in read_scopes
+    ]
+    if not out:
+        return read_scopes
+    return tuple(dict.fromkeys(out))
+
+
 def _entry_to_context(identity: str, entry: Dict[str, Any]) -> WorkspaceContext:
+    read_scopes = _normalize_scopes(entry.get("scopes"))
+    write_scopes = _normalize_write_scopes(entry.get("write_scopes"), read_scopes)
     return WorkspaceContext(
         identity=identity,
-        allowed_scopes=_normalize_scopes(entry.get("scopes")),
+        allowed_scopes=read_scopes,
         role=str(entry.get("role", "user")),
         display_name=str(entry.get("name", "")),
+        write_scopes=write_scopes,
     )
 
 
@@ -77,6 +102,7 @@ async def verify_api_key(
             allowed_scopes=defaults,
             role="admin",
             display_name="Auth disabled",
+            write_scopes=defaults,
         )
 
     token = None
@@ -104,7 +130,9 @@ async def verify_api_key(
     oauth_clients = config.get("oauth_clients") or {}
 
     if isinstance(keys, dict) and token in keys and isinstance(keys[token], dict):
-        return _entry_to_context(f"key:{token[:12]}…", keys[token])
+        # ASCII only: identity reaches the Mcp-Session-Id header, and HTTP
+        # header values must be latin-1 encodable.
+        return _entry_to_context(f"key:{token[:12]}...", keys[token])
 
     expected_key = os.getenv("MCP_API_KEY")
     if expected_key and token == expected_key:
@@ -115,6 +143,7 @@ async def verify_api_key(
             allowed_scopes=defaults,
             role="admin",
             display_name="Static MCP_API_KEY",
+            write_scopes=defaults,
         )
 
     try:
@@ -130,6 +159,7 @@ async def verify_api_key(
                 allowed_scopes=defaults,
                 role="user",
                 display_name="OAuth client (default scopes)",
+                write_scopes=defaults,
             )
     except Exception:
         pass

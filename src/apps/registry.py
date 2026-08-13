@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from src.scope import KNOWN_SCOPES
 from src.types import MCPResource, MCPTool
 
 from .paths import (
@@ -15,6 +16,9 @@ from .paths import (
 )
 
 Handler = Callable[..., Awaitable[Dict[str, Any]]]
+
+_SCOPE_ENUM = list(KNOWN_SCOPES)
+_WORK_SCOPE_ENUM = ["work"]
 
 # App name → human label for resources/list
 _UI_APPS: Dict[str, str] = {
@@ -369,8 +373,8 @@ def get_app_tools() -> List[MCPTool]:
                 "entity": {"type": "string", "description": "Entity name or alias"},
                 "scope": {
                     "type": "string",
-                    "enum": ["personal", "passion", "work", "parallax"],
-                    "description": "Workspace scope (required; never inferred)",
+                    "enum": _WORK_SCOPE_ENUM,
+                    "description": "Work-only; other scopes including parallax are rejected",
                     "default": "work",
                 },
                 "since": {
@@ -388,7 +392,7 @@ def get_app_tools() -> List[MCPTool]:
             "App-only: expand prep card with build_context (token-budgeted).",
             {
                 "entity": {"type": "string"},
-                "scope": {"type": "string", "enum": ["personal", "passion", "work", "parallax"]},
+                "scope": {"type": "string", "enum": _WORK_SCOPE_ENUM},
                 "hops": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1},
                 "token_budget": {"type": "integer", "default": 4000},
             },
@@ -402,7 +406,7 @@ def get_app_tools() -> List[MCPTool]:
             "App-only: full interaction timeline for an entity (replaces Recent panel).",
             {
                 "entity": {"type": "string"},
-                "scope": {"type": "string", "enum": ["personal", "passion", "work", "parallax"]},
+                "scope": {"type": "string", "enum": _WORK_SCOPE_ENUM},
                 "from_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "to_date": {"type": "string", "description": "YYYY-MM-DD"},
             },
@@ -416,7 +420,7 @@ def get_app_tools() -> List[MCPTool]:
             "Convention drift as an approvable checklist. Calls lint_vault(fix=False) "
             "and graph_health; never auto-fixes.",
             {
-                "scope": {"type": "string", "enum": ["personal", "passion", "work", "parallax"]},
+                "scope": {"type": "string", "enum": _SCOPE_ENUM},
                 "categories": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -433,7 +437,7 @@ def get_app_tools() -> List[MCPTool]:
             "App-only: apply selected lint findings by id after user approval. "
             "Re-lints server-side; returns applied/skipped/stale.",
             {
-                "scope": {"type": "string", "enum": ["personal", "passion", "work", "parallax"]},
+                "scope": {"type": "string", "enum": _SCOPE_ENUM},
                 "finding_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -539,7 +543,7 @@ def get_app_tools() -> List[MCPTool]:
                     "type": "string",
                     "description": "Vault-root path e.g. 01_seeds/2026-07-31-….md",
                 },
-                "scope": {"type": "string", "enum": ["personal", "passion", "work", "parallax"]},
+                "scope": {"type": "string", "enum": _SCOPE_ENUM},
                 "target_folder": {
                     "type": "string",
                     "enum": ["01_seeds", "04_resources", "05_knowledge"],

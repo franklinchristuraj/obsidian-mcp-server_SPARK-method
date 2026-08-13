@@ -130,7 +130,7 @@ async def _find_commitments(
 async def compose_prep_card(
     entity: str, scope: str = "work", since: Optional[str] = None
 ) -> Dict[str, Any]:
-    scope = require_scope(scope)
+    scope = require_scope(scope, allowed=("work",))
     resolved = await call_vault("resolve_entity", name=entity, scope=scope)
 
     if resolved.get("disambiguation_required"):
@@ -290,7 +290,7 @@ async def compose_prep_card_expand(
     hops: int = 1,
     token_budget: int = 4000,
 ) -> Dict[str, Any]:
-    scope = require_scope(scope)
+    scope = require_scope(scope, allowed=("work",))
     return await call_vault(
         "build_context",
         seed=entity,
@@ -306,7 +306,7 @@ async def compose_prep_card_timeline(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    scope = require_scope(scope)
+    scope = require_scope(scope, allowed=("work",))
     return await call_vault(
         "timeline",
         name=entity,

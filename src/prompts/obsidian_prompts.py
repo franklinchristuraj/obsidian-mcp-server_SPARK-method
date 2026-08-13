@@ -73,8 +73,7 @@ class ObsidianPrompts:
             MCPPrompt(
                 name="area_note_template",
                 description=(
-                    "Area note YAML under 03_areas/; choose MCP scope "
-                    "(personal/passion/work/parallax) from context."
+                    "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work/parallax) from context."
                 ),
                 arguments=[
                     {
@@ -144,35 +143,36 @@ class ObsidianPrompts:
 
 The vault is split into top-level folders (scopes):
 
-| Scope | Typical use |
-|-------|-------------|
-| `personal` | Journal, family, finances, health, trips, people |
-| `passion` | Research, side projects, content, learning, blueprints |
-| `work` | Employer projects, meetings, stakeholders, OKRs, **entity graph** |
-| `parallax` | Frontier product build: charter, decisions, discovery, opaque org codes |
+| Scope | Typical use | Camera-safe? |
+|-------|-------------|--------------|
+| `personal` | Journal, family, finances, health, trips, people | Never |
+| `passion` | Research, side projects, content, learning, blueprints | Show vault |
+| `work` | Employer projects, meetings, stakeholders, OKRs, **entity graph** | Work only |
+| `parallax` | Frontier product build: charter, decisions, discovery, conversations, opaque `entities/org/` | Safe by construction, no third-party material ever enters |
 
-Each of personal/passion/work has its own SPARK folders (`00_system/templates/`, `01_seeds/`, …). `parallax` is deliberately sparse (charter, decisions, discovery, conversations, `entities/org/`). Same relative path in two scopes is **two different notes**.
+Each scope has its own `00_system/templates/` and layout. Same relative path in two scopes is **two different notes**. Parallax deliberately omits `02_projects/`, `03_areas/`, `04_resources/`, `05_knowledge/`, `raw/`, and `entities/person/`.
 
 ## 2. Start with `workspaces`
 
-Call the **`workspaces`** tool once per session (or when unsure). It returns which scopes this **API key** may use. Do not assume access to all four.
+Call the **`workspaces`** tool once per session (or when unsure). It returns **`scopes`** (reads) and **`write_scopes`** (writes) for this API key. Do not assume access to all four. Parallax agent keys often read all four but write only `parallax`.
 
 **Recommended session start:** `workspaces` → load this guide (or vault `AGENTS.md`) → `ping` for health. For entity questions, go straight to vault intelligence tools — not search+read loops.
 
 ## 3. Paths and `scope`
 
-- **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`.
+- **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`, `entities/org/o-014.md`.
 - **Work meeting notes** use **`scope=work`** and paths under **`11_work-meeting-notes/`** (aligned with meeting templates in `template_utils`).
 - **Never** put `personal/`, `passion/`, `work/`, or `parallax/` as the first segment of `path`. Use the **`scope`** parameter instead.
-- **Reads** (search, list, vault intelligence, read): optional `scope`. Omit to include all scopes allowed for this key; set it to narrow to one workspace.
-- **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`): if the key has **more than one** allowed scope, **`scope` is required**. If the key has exactly one scope, it is auto-selected.
+- **Reads** (search, list, vault intelligence, read): optional `scope`. Omit to include all **read** scopes for this key; set it to narrow to one workspace.
+- **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`, `promote_capture`): gated by **`write_scopes`**. If the key has more than one write scope, **`scope` is required**. Single-write-scope keys auto-select.
+- **Work-only tools** (`create_event`, `create_engagement`, `capture_snapshot`, `engagement_delta`, `impact_rollup`, `prep_card`, snapshot/debrief apps) **reject** `parallax` loudly — they never silently write into `work/`.
 
 ## 4. Work vault entity graph (read the structure, do not infer it)
 
 The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 
 - **Entity cards** live at `entities/{entity_type}/{kebab-name}.md` (e.g. `entities/customer/gojob.md`).
-- **`entity_type`** is one of: `person`, `internal-stakeholder`, `customer`, `partner`, `company`, `concept`, `tool`, `industry`, `use-case`, `event`.
+- **`entity_type`** is one of: `person`, `internal-stakeholder`, `customer`, `partner`, `company`, `org`, `concept`, `tool`, `industry`, `use-case`, `event`. (`org` = parallax opaque company codes under `entities/org/`.)
 - Most cards have YAML frontmatter: `type`, `created`, `agent_context`, `tags`, `entity_type`, plus optional `aliases`, `poc_stage`, `lifecycle_stage`, etc.
 - **`## Connections`** lists related notes as `[[wikilinks]]` (paths workspace-relative, no `work/` prefix).
 - **`## Source History`** holds dated mention lines with wikilinks.
@@ -334,7 +334,7 @@ For a whole work meeting (brief before, log after), load **`meeting_prep_workflo
 
 ## MCP tools and workspace paths
 
-When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. SPARK folder names below exist inside `personal/`, `passion/`, and `work/` on disk; `parallax/` uses a sparse layout (see vault `parallax/CLAUDE.md`).
+When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. The same folder names below exist **inside each** of `personal/`, `passion/`, `work/`, and (reduced) `parallax/` on disk.
 
 For **tool choice, scope rules, and resources vs tools**, load the **`vault_mcp_agent_guide`** prompt first.
 
@@ -594,7 +594,7 @@ Use this template for area notes in the `03_areas/` folder inside a workspace.
 
 ## File Structure
 - **Filename**: `{name_placeholder.lower().replace(' ', '-')}.md`
-- **MCP path**: `03_areas/<filename>.md` with appropriate `scope` (personal / passion / work / parallax).
+- **MCP path**: `03_areas/<filename>.md` with appropriate `scope` (personal vs passion vs work).
 - **On disk**: `<scope>/03_areas/...` (scope is the workspace you pass)
 
 ## Template:

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from src.apps.composers import require_scope
+from src.scope import get_effective_workspace_context, resolve_write_scope
 from src.tools.obsidian_tools import obsidian_tools
 
 _TARGET_FOLDERS = {
@@ -48,6 +49,13 @@ async def promote_capture(
     tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     scope = require_scope(scope)
+    ctx = get_effective_workspace_context()
+    try:
+        scope = resolve_write_scope(scope, tuple(ctx.effective_write_scopes))
+    except (PermissionError, ValueError) as e:
+        if isinstance(e, PermissionError):
+            raise ValueError("Access denied") from e
+        raise
     if target_folder not in _TARGET_FOLDERS:
         raise ValueError(
             f"target_folder must be one of {sorted(_TARGET_FOLDERS)}, got {target_folder!r}"
@@ -131,12 +139,10 @@ async def archive_capture(path: str) -> Dict[str, Any]:
     dest = archive_dir / src.name
     if dest.exists():
         dest = archive_dir / f"{src.stem}-archived{src.suffix}"
+    src.rename(dest)
 
-    text = src.read_text(encoding="utf-8")
-    fm, body = _parse_frontmatter(text)
-    fm["status"] = "archived"
-    dest.write_text(_dump_note(fm, body), encoding="utf-8")
-    src.unlink()
-
-    new_path = f"99_archive/01_seeds/{dest.name}"
-    return {"ok": True, "old_path": rel, "new_path": new_path}
+    return {
+        "ok": True,
+        "old_path": rel,
+        "new_path": str(dest.relative_to(client.vault_path)).replace("\\", "/"),
+    }

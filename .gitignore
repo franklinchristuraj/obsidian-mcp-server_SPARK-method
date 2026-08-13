@@ -86,3 +86,4 @@ temp/
 .dev-server.pid
 dev-server.log
 .claude/settings.local.json
+.workspace_keys_issued.txt

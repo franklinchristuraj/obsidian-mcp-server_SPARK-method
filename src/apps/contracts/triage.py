@@ -5,6 +5,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from src.scope import KNOWN_SCOPES
+
 
 class TriageCounts(BaseModel):
     thought: int = 0
@@ -30,9 +32,7 @@ class TriageBoardPayload(BaseModel):
     counts: TriageCounts
     oldest_days: Optional[int] = None
     items: List[TriageItem] = Field(default_factory=list)
-    scopes: List[str] = Field(
-        default_factory=lambda: ["personal", "passion", "work", "parallax"]
-    )
+    scopes: List[str] = Field(default_factory=lambda: list(KNOWN_SCOPES))
     target_types: List[str] = Field(
         default_factory=lambda: ["seed", "resource", "knowledge"]
     )

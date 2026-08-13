@@ -1,5 +1,8 @@
 """Unit tests for create_note template rendering and empty-write guard."""
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Dict, Optional
 from unittest.mock import AsyncMock
 
@@ -13,6 +16,7 @@ class _MockObsidianClient:
     def __init__(self, templates: Optional[Dict[str, str]] = None):
         self.templates = dict(templates or {})
         self.created: list[tuple[str, str]] = []
+        self.vault_path = tempfile.mkdtemp(prefix="create-note-tpl-")
 
     async def read_note(self, path: str) -> str:
         if path not in self.templates:
@@ -28,8 +32,17 @@ class _MockObsidianClient:
 
 class TestCreateNoteTemplates(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self._vault = tempfile.mkdtemp(prefix="create-note-tpl-env-")
+        for scope in ("personal", "passion", "work", "parallax"):
+            Path(self._vault, scope).mkdir()
+        os.environ["OBSIDIAN_VAULT_PATH"] = self._vault
         self.tools = ObsidianTools()
         self.tools._vault_intel = None
+
+    async def asyncTearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self._vault, ignore_errors=True)
 
     async def test_meeting_notes_alias_triggers_smart_builder(self) -> None:
         client = _MockObsidianClient()

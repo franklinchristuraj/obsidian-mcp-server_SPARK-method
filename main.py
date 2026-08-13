@@ -405,23 +405,22 @@ async def create_sse_stream(
     result_data: Any = None,
     enable_streaming: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """Create Server-Sent Events stream for MCP responses"""
-    # Send initial JSON-RPC response
+    """Emit an MCP-compliant Streamable HTTP SSE response.
+
+    MCP Streamable HTTP requires every SSE ``data:`` event to be a JSON-RPC
+    message; the client reads the response(s) and treats the request as done
+    when the stream closes. The prior implementation appended OpenAI-style
+    ``{"type": "content"/"list_item"}`` chunks plus a ``data: [DONE]`` sentinel.
+    Neither is valid JSON-RPC, and ``[DONE]`` is not even valid JSON, so
+    spec-compliant clients abort mid-stream with
+    ``Unexpected token 'D', "[DONE]" is not valid JSON``. The complete response
+    already rides in the single event below, so the chunks were redundant. Emit
+    exactly one response event and close.
+
+    ``result_data`` / ``enable_streaming`` are kept for call-site compatibility
+    but intentionally unused.
+    """
     yield f"data: {json.dumps(jsonrpc_response)}\n\n"
-
-    # If streaming is enabled and we have large data, stream it
-    if enable_streaming and result_data:
-        if isinstance(result_data, str) and len(result_data) > 1024:
-            # Stream large text content
-            async for chunk in mcp_handler.create_streaming_response(result_data):
-                yield chunk
-        elif isinstance(result_data, list) and len(result_data) > 10:
-            # Stream large lists
-            async for chunk in mcp_handler.create_streaming_response(result_data):
-                yield chunk
-
-    # Send completion signal
-    yield "data: [DONE]\n\n"
 
 
 @app.get("/mcp/debug")
@@ -458,6 +457,19 @@ async def mcp_sse_endpoint(request: Request, _auth=Depends(verify_api_key)):
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+def _header_safe(value: str) -> str:
+    """Coerce a string to something usable as an HTTP header value.
+
+    Header values are latin-1 encoded, so any character outside that range
+    raises when the response is built rather than at the call site.
+    """
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError:
+        return value.encode("ascii", "backslashreplace").decode("ascii")
+    return value
 
 
 def _log_tools_call(
@@ -547,6 +559,11 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
             session_id = incoming_session_id or observability.fallback_session_id(
                 auth.identity
             )
+        # The fallback id embeds the caller identity (key label or OAuth
+        # client_id), which can carry arbitrary Unicode. Header values must be
+        # latin-1 encodable or Starlette raises while building the response,
+        # which aborts it mid-flight and drops the client's session.
+        session_id = _header_safe(session_id)
         obs_client = observability.resolve_client(session_id)
 
         ctx_token = workspace_ctx.set(auth)

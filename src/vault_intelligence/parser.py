@@ -26,6 +26,29 @@ REQUIRED_ENTITY_FM_BY_TYPE: Dict[str, frozenset] = {
         {"entity_type", "event_type", "event_date", "agent_context", "last_updated"}
     ),
 }
+# Documented entity_type values across work + parallax. `org` is the parallax
+# opaque-company card (entities/org/); work still uses customer/company/partner.
+ENTITY_TYPES = frozenset(
+    {
+        "person",
+        "internal-stakeholder",
+        "customer",
+        "partner",
+        "company",
+        "org",
+        "concept",
+        "tool",
+        "industry",
+        "use-case",
+        "event",
+    }
+)
+# Parallax note types (SPARK-adjacent, not entity graph).
+CONVERSATION_STATUSES = frozenset({"raw", "processed"})
+HYPOTHESIS_STATUSES = frozenset({"open", "killed", "promoted"})
+CONVERSATION_FILENAME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}_[a-z0-9-]+_[a-z0-9-]+\.md$", re.IGNORECASE
+)
 # Controlled vocabulary for event entity_type=event cards.
 EVENT_TYPES = frozenset(
     {

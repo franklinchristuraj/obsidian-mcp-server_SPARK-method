@@ -1,9 +1,16 @@
 {
   "keys": {
     "sk_admin_REPLACE_ME": {
-      "name": "Admin",
+      "name": "Admin / Interactive",
       "scopes": ["personal", "passion", "work", "parallax"],
+      "write_scopes": ["personal", "passion", "work", "parallax"],
       "role": "admin"
+    },
+    "sk_parallax_agent_REPLACE_ME": {
+      "name": "Parallax agent",
+      "scopes": ["personal", "passion", "work", "parallax"],
+      "write_scopes": ["parallax"],
+      "role": "agent"
     },
     "sk_personal_REPLACE_ME": {
       "name": "Personal Claude",
@@ -14,12 +21,18 @@
       "name": "Work Claude",
       "scopes": ["work"],
       "role": "user"
+    },
+    "sk_passion_agent_REPLACE_ME": {
+      "name": "Passion agent (no parallax)",
+      "scopes": ["passion"],
+      "role": "agent"
     }
   },
   "oauth_clients": {
     "paste-oauth-client-id-here": {
       "name": "Claude web client",
       "scopes": ["personal", "passion", "work", "parallax"],
+      "write_scopes": ["personal", "passion", "work", "parallax"],
       "role": "user"
     }
   }

@@ -20,6 +20,14 @@ class WorkspaceContext:
     allowed_scopes: Tuple[str, ...]
     role: str
     display_name: str = ""
+    # When None, writes use allowed_scopes (backward compatible).
+    write_scopes: Optional[Tuple[str, ...]] = None
+
+    @property
+    def effective_write_scopes(self) -> Tuple[str, ...]:
+        if self.write_scopes is None:
+            return self.allowed_scopes
+        return self.write_scopes
 
 
 workspace_ctx: ContextVar[Optional[WorkspaceContext]] = ContextVar(
@@ -42,11 +50,13 @@ def get_effective_workspace_context() -> WorkspaceContext:
     ctx = workspace_ctx.get()
     if ctx is not None:
         return ctx
+    defaults = parse_default_workspace_scopes()
     return WorkspaceContext(
         identity="local-default",
-        allowed_scopes=parse_default_workspace_scopes(),
+        allowed_scopes=defaults,
         role="admin",
         display_name="Default",
+        write_scopes=defaults,
     )
 
 
@@ -117,22 +127,23 @@ def active_scopes_for_read(
 
 
 def resolve_write_scope(
-    scope_param: Optional[str], allowed_scopes: Tuple[str, ...]
+    scope_param: Optional[str], write_scopes: Tuple[str, ...]
 ) -> str:
     """
-    Single allowed scope -> auto-selected. Multiple -> scope_param required.
+    Single write scope -> auto-selected. Multiple -> scope_param required.
+    Validates against write_scopes (not read scopes).
     """
-    if len(allowed_scopes) == 1:
-        only = allowed_scopes[0]
+    if len(write_scopes) == 1:
+        only = write_scopes[0]
         if scope_param is None or scope_param == "":
             return only
-        _validate_scope(scope_param, allowed_scopes)
+        _validate_scope(scope_param, write_scopes)
         return scope_param
     if scope_param is None or scope_param == "":
         raise ValueError(
             "This API key has access to multiple workspaces; you must pass scope."
         )
-    _validate_scope(scope_param, allowed_scopes)
+    _validate_scope(scope_param, write_scopes)
     return scope_param
 
 

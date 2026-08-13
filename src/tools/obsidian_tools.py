@@ -13,6 +13,7 @@ from datetime import datetime
 
 from src.clients.obsidian_client import ObsidianClient, ObsidianAPIError
 from src.scope import (
+    KNOWN_SCOPES,
     active_scopes_for_read,
     forbid_scope_prefix_in_agent_path,
     get_effective_workspace_context,
@@ -449,10 +450,11 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "type": "object",
         "properties": {
             "scopes": {"type": "array", "items": {"type": "string"}},
+            "write_scopes": {"type": "array", "items": {"type": "string"}},
             "role": {"type": "string"},
             "display_name": {"type": "string"},
         },
-        "required": ["scopes"],
+        "required": ["scopes", "write_scopes"],
     },
     "vault_structure": {
         "type": "object",
@@ -858,7 +860,7 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
 def _scope_schema_read() -> Dict[str, Any]:
     return {
         "type": "string",
-        "enum": ["personal", "passion", "work", "parallax"],
+        "enum": list(KNOWN_SCOPES),
         "description": (
             "Workspace folder. Omit to include all workspaces allowed for this API key; "
             "set to narrow reads to one workspace."
@@ -869,10 +871,20 @@ def _scope_schema_read() -> Dict[str, Any]:
 def _scope_schema_write() -> Dict[str, Any]:
     return {
         "type": "string",
-        "enum": ["personal", "passion", "work", "parallax"],
+        "enum": list(KNOWN_SCOPES),
         "description": (
-            "Target workspace. Required when this key can access more than one workspace."
+            "Target workspace. Required when this key can write to more than one workspace "
+            "(see workspaces.write_scopes)."
         ),
+    }
+
+
+def _scope_schema_work_only() -> Dict[str, Any]:
+    return {
+        "type": "string",
+        "enum": ["work"],
+        "description": "Work-only tool. scope must be work; other scopes (including parallax) are rejected.",
+        "default": "work",
     }
 
 
@@ -984,6 +996,7 @@ class ObsidianTools:
 
         sr = _scope_schema_read()
         sw = _scope_schema_write()
+        sw_work = _scope_schema_work_only()
         meeting_vars_desc = """Variables for template substitution. For meeting notes, supports smart structured data:
 - title: Meeting title
 - date: YYYY-MM-DD format
@@ -1008,7 +1021,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "type": "string",
                 "description": (
                     "Path relative to the workspace (e.g. '06_daily-notes/2026-04-11.md'). "
-                    "Do not prefix with personal/passion/work/parallax — use scope instead."
+                    "Do not prefix with personal/passion/work — use scope instead."
                 ),
             },
             "content": {
@@ -1073,7 +1086,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         read_path_prop = {
             "path": {
                 "type": "string",
-                "description": "Note path relative to workspace (no personal/passion/work/parallax prefix)",
+                "description": "Note path relative to workspace (no personal/passion/work prefix)",
             },
             "scope": sr,
         }
@@ -1177,6 +1190,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "workspaces",
                 (
                     "List workspace folders (scopes) allowed for this API key. "
+                    "Returns scopes (reads) and write_scopes (writes). "
                     "Call early in a session; then load MCP prompt vault_mcp_agent_guide for tool workflows."
                 ),
                 {},
@@ -1349,8 +1363,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "scope": sr,
                     "folder": {
                         "type": "string",
-                        "description": "Folder to scan (default entities)",
-                        "default": "entities",
+                        "description": (
+                            "Folder to scan. Defaults to 'entities' for "
+                            "personal/passion/work; scans the whole workspace "
+                            "for parallax, which has no entities/ tree."
+                        ),
                     },
                     "fix": {
                         "type": "boolean",
@@ -1557,7 +1574,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "(graph edges as bare wikilinks), and a # title / > agent_context / "
                     "## Connections / ## Outcome body. By default it also idempotently "
                     "adds a ## Events back-ref to the linked customer / participants / "
-                    "non-home organizations. Use scope=work."
+                    "non-home organizations. Work-only; scope=parallax and other "
+                    "non-work scopes are rejected."
                 ),
                 {
                     "event_type": {
@@ -1654,7 +1672,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "enum": sorted(SIGNAL_CONFIDENCE),
                         "description": "Confidence in captured market/product signal.",
                     },
-                    "scope": sw,
+                    "scope": sw_work,
                     "update_backrefs": {
                         "type": "boolean",
                         "description": "Add ## Events back-refs to linked entities (default true).",
@@ -1672,7 +1690,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "generic ve-engagement). Use for parent Build-with-Me adoption "
                     "programs and technical deep-dive specialist pull-ins. Child "
                     "interactions should then be logged with create_event + "
-                    "parent_engagement. scope=work."
+                    "parent_engagement. scope=work only; other scopes including "
+                    "parallax are rejected."
                 ),
                 {
                     "engagement_type": {
@@ -1796,7 +1815,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                         "description": "Optional filename slug override (kebab-case).",
                         "default": "",
                     },
-                    "scope": sw,
+                    "scope": sw_work,
                     "update_index": {
                         "type": "boolean",
                         "description": "Append hub wiring hints to index/log (default true).",
@@ -1810,7 +1829,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 (
                     "Idempotently write a canonical JSON metric snapshot and a "
                     "Dataview-compatible Markdown mirror under "
-                    "12_engagements/_snapshots/{org_id}/{date}. Use scope=work."
+                    "12_engagements/_snapshots/{org_id}/{date}. Work-only; "
+                    "scope=parallax and other non-work scopes are rejected."
                 ),
                 {
                     "org_id": {
@@ -1920,6 +1940,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         ctx = get_effective_workspace_context()
         payload = {
             "scopes": list(ctx.allowed_scopes),
+            "write_scopes": list(ctx.effective_write_scopes),
             "role": ctx.role,
             "display_name": ctx.display_name,
         }
@@ -1942,7 +1963,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
     ) -> Tuple[str, str, str]:
         """Returns (vault_full_path, relative_path_for_display, workspace_scope)."""
         ctx = get_effective_workspace_context()
-        allow = tuple(ctx.allowed_scopes)
+        write_allow = tuple(ctx.effective_write_scopes)
         forbid_scope_prefix_in_agent_path(path)
         rel = path
         if normalize:
@@ -1950,8 +1971,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
             rel = template_detector.normalize_folder_path(path)
         try:
-            ws = resolve_write_scope(scope, allow)
-            full = resolve_scoped_path(rel, ws, allow)
+            ws = resolve_write_scope(scope, write_allow)
+            full = resolve_scoped_path(rel, ws, write_allow)
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
         return full, rel, ws
@@ -2047,11 +2068,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             path = normalized_path
 
             ctx = get_effective_workspace_context()
-            allow = tuple(ctx.allowed_scopes)
+            write_allow = tuple(ctx.effective_write_scopes)
             try:
                 forbid_scope_prefix_in_agent_path(original_path)
-                write_scope = resolve_write_scope(scope, allow)
-                full_path = resolve_scoped_path(path, write_scope, allow)
+                write_scope = resolve_write_scope(scope, write_allow)
+                full_path = resolve_scoped_path(path, write_scope, write_allow)
             except (ValueError, PermissionError) as e:
                 raise self._access_error(e) from e
 
@@ -2557,10 +2578,11 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             )
             forbid_scope_prefix_in_agent_path(new_path)
             new_rel = template_detector.normalize_folder_path(new_path)
-            ctx = get_effective_workspace_context()
-            allow = tuple(ctx.allowed_scopes)
+            write_allow = tuple(
+                get_effective_workspace_context().effective_write_scopes
+            )
             try:
-                new_full = resolve_scoped_path(new_rel, write_scope, allow)
+                new_full = resolve_scoped_path(new_rel, write_scope, write_allow)
             except (ValueError, PermissionError) as e:
                 raise self._access_error(e) from e
 
@@ -3489,22 +3511,22 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         type_for_name = touchpoint_type or event_type
 
         ctx = get_effective_workspace_context()
-        allow = tuple(ctx.allowed_scopes)
+        write_allow = tuple(ctx.effective_write_scopes)
         try:
-            write_scope = resolve_write_scope(scope, allow)
+            write_scope = resolve_write_scope(scope, write_allow)
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
         if write_scope != "work":
             raise ValueError(
-                "create_event only supports scope='work' "
-                f"(got '{write_scope}'; refuses writing event entities outside work/)"
+                "create_event only supports scope='work' (work-only tool); "
+                f"refused scope={write_scope!r}. Nothing was written."
             )
 
         base = f"entities/event/{event_date}-{fn_slug}-{type_for_name}"
         rel = f"{base}.md"
         n = 1
         while True:
-            full = resolve_scoped_path(rel, write_scope, allow)
+            full = resolve_scoped_path(rel, write_scope, write_allow)
             if not await self.client.note_exists(full):
                 break
             n += 1
@@ -3635,7 +3657,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     )
 
             if parent_rel:
-                parent_full = resolve_scoped_path(parent_rel, write_scope, allow)
+                parent_full = resolve_scoped_path(parent_rel, write_scope, write_allow)
                 try:
                     if await self.client.note_exists(parent_full):
                         existing = await self.client.read_note(parent_full)
@@ -3811,18 +3833,18 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
 
         rel = f"12_engagements/{date}_{desc}.md"
         ctx = get_effective_workspace_context()
-        allow = tuple(ctx.allowed_scopes)
+        write_allow = tuple(ctx.effective_write_scopes)
         try:
-            write_scope = resolve_write_scope(scope, allow)
+            write_scope = resolve_write_scope(scope, write_allow)
         except (ValueError, PermissionError) as e:
             raise self._access_error(e) from e
         if write_scope != "work":
             raise ValueError(
-                "create_engagement only supports scope='work' "
-                f"(got '{write_scope}'; refuses writing engagements outside work/)"
+                "create_engagement only supports scope='work' (work-only tool); "
+                f"refused scope={write_scope!r}. Nothing was written."
             )
 
-        full = resolve_scoped_path(rel, write_scope, allow)
+        full = resolve_scoped_path(rel, write_scope, write_allow)
         if await self.client.note_exists(full):
             raise ValueError(f"Engagement already exists: {rel}")
 
@@ -3908,7 +3930,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 ("index.md", index_line, "index"),
                 ("log.md", log_line, "log"),
             ):
-                hub_full = resolve_scoped_path(hub_path, write_scope, allow)
+                hub_full = resolve_scoped_path(hub_path, write_scope, write_allow)
                 try:
                     if await self.client.note_exists(hub_full):
                         existing = await self.client.read_note(hub_full)

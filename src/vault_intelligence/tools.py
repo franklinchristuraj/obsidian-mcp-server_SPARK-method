@@ -13,15 +13,23 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
-from src.scope import active_scopes_for_read, get_effective_workspace_context
+from src.scope import (
+    KNOWN_SCOPES,
+    active_scopes_for_read,
+    get_effective_workspace_context,
+)
 
 from .corpus import ConcurrentModificationError, VaultCorpus
 from .entity_index import EntityIndex, match_entities
 from .graph import GraphIndex, as_link_list
 from .parser import (
     CONNECTIONS_HEADING,
+    CONVERSATION_FILENAME_RE,
+    CONVERSATION_STATUSES,
+    ENTITY_TYPES,
     EVENT_TYPES,
     EVENTS_HEADING,
+    HYPOTHESIS_STATUSES,
     OPEN_QUESTIONS_HEADING,
     SNAPSHOT_MODE,
     SNAPSHOT_SOURCE,
@@ -93,6 +101,18 @@ def _json_result(payload: Any) -> Dict[str, Any]:
         "content": [{"type": "text", "text": json.dumps(payload, indent=2, ensure_ascii=False)}],
         "metadata": payload if isinstance(payload, dict) else {"result": payload},
     }
+
+
+def _is_template_note(path: str) -> bool:
+    """True for notes living in a templates/ directory.
+
+    Templates carry placeholder frontmatter and intentionally non-conforming
+    filenames, so linting them reports drift that can never be fixed.
+    """
+    return any(
+        part.lower() in ("templates", "_templates")
+        for part in Path(path).parts[:-1]
+    )
 
 
 def _truncate(items: List[Any], cap: int) -> Tuple[List[Any], bool, int]:
@@ -433,12 +453,43 @@ class VaultIntelligenceTools:
             named = name_index.get(link.strip().lower())
             if named is not None:
                 return named.path
-        # 3. Filesystem full-path resolution per scope.
-        for s in self._resolve_scopes(scope):
+        scopes = self._resolve_scopes(scope)
+        # 3. Vault-root-relative link that repeats the note's own workspace
+        #    (``[[parallax/charter.md]]`` written from inside parallax, which is
+        #    how Obsidian renders a full path from the vault root). Strip the
+        #    prefix so it becomes the workspace-relative path we index by.
+        prefix, _, remainder = link.replace("\\", "/").lstrip("/").partition("/")
+        if remainder and prefix in scopes:
+            note = notes_by_key.get(normalize_path_key(remainder))
+            if note is not None:
+                return note.path
+            vp = self.corpus.resolve_vault_path(prefix, remainder)
+            if vp:
+                return vp
+        # 4. Filesystem full-path resolution per scope.
+        for s in scopes:
             vp = self.corpus.resolve_vault_path(s, link)
             if vp:
                 return vp
         return None
+
+    def _resolve_cross_scope_link(self, link: str) -> Optional[str]:
+        """Resolve a vault-root-relative link pointing into another workspace.
+
+        Returns ``"<scope>/<workspace-relative path>"`` when the target exists
+        and the caller is allowed to read that workspace, else None. Separate
+        from ``_resolve_link`` because the result is not addressable within the
+        workspace being processed, so it must never feed the path-keyed indexes
+        that back inbound-link and orphan counts.
+        """
+        prefix, _, remainder = link.replace("\\", "/").lstrip("/").partition("/")
+        if not remainder or prefix not in KNOWN_SCOPES:
+            return None
+        ctx = get_effective_workspace_context()
+        if prefix not in tuple(ctx.allowed_scopes):
+            return None
+        vp = self.corpus.resolve_vault_path(prefix, remainder)
+        return f"{prefix}/{vp}" if vp else None
 
     def _enrich_connection(
         self,
@@ -586,9 +637,11 @@ class VaultIntelligenceTools:
 
         key_fm = {k: match.frontmatter[k] for k in KEY_FRONTMATTER_FIELDS if k in match.frontmatter}
 
-        # Surface linked 12_engagements/ notes for customer/partner entities.
+        # Surface linked 12_engagements/ notes for customer/partner/company/org
+        # entities. Parallax has no 12_engagements/ — load_scope returns [] and
+        # engagements stays empty (no error on missing work-only fields).
         engagements_raw: List[dict] = []
-        if match.entity_type in ("customer", "partner", "company"):
+        if match.entity_type in ("customer", "partner", "company", "org"):
             all_notes = await self._all_notes(scope, folder="12_engagements")
             target_key = normalize_path_key(match.path)
             stem = Path(match.path).stem.lower()
@@ -748,7 +801,10 @@ class VaultIntelligenceTools:
         scope: str,
     ) -> Tuple[str, str, str, str]:
         if scope != "work":
-            raise ValueError("capture_snapshot only supports scope='work'")
+            raise ValueError(
+                "capture_snapshot only supports scope='work'; "
+                f"refused scope={scope!r} (including parallax). Nothing was written."
+            )
         self._resolve_scopes("work")
         normalized_org_id = self._validate_org_id(org_id)
         captured = _parse_iso_date(date_value).isoformat()
@@ -1024,7 +1080,10 @@ class VaultIntelligenceTools:
         scope: str = "work",
     ) -> Dict[str, Any]:
         if scope != "work":
-            raise ValueError("engagement_delta only supports scope='work'")
+            raise ValueError(
+                "engagement_delta only supports scope='work'; "
+                f"refused scope={scope!r} (including parallax). Nothing was written."
+            )
         self._resolve_scopes("work")
         normalized_path = self._normalize_engagement_path(engagement_path)
         note = await asyncio.to_thread(
@@ -1089,7 +1148,10 @@ class VaultIntelligenceTools:
         from_date: str, to_date: str, filters: Optional[dict], scope: str
     ) -> Tuple[date, date, dict]:
         if scope != "work":
-            raise ValueError("impact_rollup only supports scope='work'")
+            raise ValueError(
+                "impact_rollup only supports scope='work'; "
+                f"refused scope={scope!r} (including parallax)."
+            )
         start = _parse_iso_date(from_date, field="from")
         finish = _parse_iso_date(to_date, field="to")
         if start > finish:
@@ -1541,7 +1603,12 @@ class VaultIntelligenceTools:
             return resolved
 
         canonical = entity_data["canonical_path"]
-        entity_scope = entity_data.get("scope") or (scope or "work")
+        entity_scope = entity_data.get("scope") or scope
+        if not entity_scope:
+            raise ValueError(
+                "Could not determine entity scope; pass scope explicitly "
+                "(do not assume work)."
+            )
         entity_note = self.corpus.get_note(entity_scope, canonical)
         if not entity_note:
             raise ValueError(f"Entity not found: {canonical}")
@@ -1624,7 +1691,12 @@ class VaultIntelligenceTools:
             return resolved
 
         canonical = entity_data["canonical_path"]
-        entity_scope = entity_data.get("scope") or (scope or "work")
+        entity_scope = entity_data.get("scope") or scope
+        if not entity_scope:
+            raise ValueError(
+                "Could not determine entity scope; pass scope explicitly "
+                "(do not assume work)."
+            )
         target_key = normalize_path_key(canonical)
 
         def in_range(date_str: str) -> bool:
@@ -1780,7 +1852,33 @@ class VaultIntelligenceTools:
         folder: Optional[str] = None,
         fix: bool = False,
     ) -> Dict[str, Any]:
-        notes = await self._all_notes(scope, folder=folder or "entities")
+        if folder:
+            raw_notes = await self._all_notes(scope, folder=folder)
+        else:
+            # Only workspaces that keep an entities/ tree (work) default to it.
+            # Elsewhere (parallax, passion, personal) the lintable notes live in
+            # ordinary folders, so defaulting to entities/ would silently scan
+            # nothing. Decided per scope, since a key may span several. The
+            # entity-only checks below are gated on the entities/ prefix, so
+            # they stay no-ops for the workspaces scanned in full.
+            raw_notes = []
+            for s in self._resolve_scopes(scope):
+                # Narrow to entities/ only where that tree actually holds cards
+                # (work). Other workspaces carry an empty entities/ scaffold and
+                # keep their lintable notes in ordinary folders, so narrowing
+                # there would silently scan nothing. Decided per scope, since a
+                # key may span several.
+                cards = await asyncio.to_thread(
+                    self.corpus.load_scope, [s], folder="entities"
+                )
+                raw_notes.extend(
+                    cards
+                    if cards
+                    else await asyncio.to_thread(
+                        self.corpus.load_scope, [s], folder=None
+                    )
+                )
+        notes = [n for n in raw_notes if not _is_template_note(n.path)]
         notes_by_key = self.corpus.index_by_path(notes)
         # Resolve bare links against the full scope corpus, not just the linted
         # folder, so event-style [[bare]] links to entities outside the scan
@@ -1794,17 +1892,27 @@ class VaultIntelligenceTools:
         broken_links: List[dict] = []
         invalid_event_type: List[str] = []
         invalid_touchpoint_type: List[str] = []
+        invalid_entity_type: List[str] = []
+        invalid_note_status: List[str] = []
+        missing_kill_condition: List[str] = []
+        invalid_conversation_filename: List[str] = []
         alias_map: Dict[str, List[str]] = {}
         inbound: Dict[str, int] = {normalize_path_key(n.path): 0 for n in notes}
 
         for note in notes:
             fm = note.frontmatter
             is_entity = note.path.startswith("entities/")
+            note_type = str(fm.get("type", "")).strip().lower()
             missing = required_fm_for(note.entity_type) - set(fm.keys())
             if missing and is_entity:
                 missing_fm.append(f"{note.path} (missing: {sorted(missing)})")
             if is_entity and CONNECTIONS_HEADING not in note.sections:
                 missing_connections.append(note.path)
+
+            if is_entity and note.entity_type and note.entity_type not in ENTITY_TYPES:
+                invalid_entity_type.append(
+                    f"{note.path} (entity_type: {note.entity_type})"
+                )
 
             # event_type controlled-vocabulary check for event cards.
             if note.entity_type == "event":
@@ -1817,6 +1925,25 @@ class VaultIntelligenceTools:
                         f"{note.path} (touchpoint_type: {tt})"
                     )
 
+            if note_type == "conversation":
+                status = str(fm.get("status", "")).strip().lower()
+                if status and status not in CONVERSATION_STATUSES:
+                    invalid_note_status.append(
+                        f"{note.path} (conversation status: {status})"
+                    )
+                filename = Path(note.path).name
+                if not CONVERSATION_FILENAME_RE.match(filename):
+                    invalid_conversation_filename.append(note.path)
+
+            if note_type == "hypothesis":
+                status = str(fm.get("status", "")).strip().lower()
+                if status and status not in HYPOTHESIS_STATUSES:
+                    invalid_note_status.append(
+                        f"{note.path} (hypothesis status: {status})"
+                    )
+                if "kill_condition" not in fm:
+                    missing_kill_condition.append(note.path)
+
             for alias in note.aliases:
                 alias_map.setdefault(alias, []).append(note.path)
 
@@ -1824,11 +1951,14 @@ class VaultIntelligenceTools:
                 resolved = self._resolve_link(
                     link, scope, resolver_by_key, name_index
                 )
-                if resolved is None:
-                    broken_links.append({"source": note.path, "link": link})
-                else:
+                if resolved is not None:
                     key = normalize_path_key(resolved)
                     inbound[key] = inbound.get(key, 0) + 1
+                elif self._resolve_cross_scope_link(link) is None:
+                    # A link into another workspace resolves against that
+                    # workspace's tree; only report it when the target really
+                    # is absent (or unreadable for this key).
+                    broken_links.append({"source": note.path, "link": link})
 
         alias_collisions = [
             {"alias": a, "paths": paths}
@@ -1852,6 +1982,10 @@ class VaultIntelligenceTools:
                 "broken_wikilinks": len(broken_links),
                 "invalid_event_type": len(invalid_event_type),
                 "invalid_touchpoint_type": len(invalid_touchpoint_type),
+                "invalid_entity_type": len(invalid_entity_type),
+                "invalid_note_status": len(invalid_note_status),
+                "missing_kill_condition": len(missing_kill_condition),
+                "invalid_conversation_filename": len(invalid_conversation_filename),
                 "orphan_entities": len(orphans),
                 "alias_collisions": len(alias_collisions),
             },
@@ -1860,6 +1994,10 @@ class VaultIntelligenceTools:
             "broken_wikilinks": broken_links[:50],
             "invalid_event_type": invalid_event_type[:50],
             "invalid_touchpoint_type": invalid_touchpoint_type[:50],
+            "invalid_entity_type": invalid_entity_type[:50],
+            "invalid_note_status": invalid_note_status[:50],
+            "missing_kill_condition": missing_kill_condition[:50],
+            "invalid_conversation_filename": invalid_conversation_filename[:50],
             "orphan_entities": orphans[:50],
             "alias_collisions": alias_collisions[:20],
         }
@@ -2063,7 +2201,13 @@ class VaultIntelligenceTools:
             if not hits:
                 raise ValueError(f"No entity or note matched: {seed!r}")
             top = hits[0]
-            found = self.corpus.get_note(top.get("scope") or (scope or "work"), top["path"])
+            note_scope = top.get("scope") or scope
+            if not note_scope:
+                raise ValueError(
+                    "Could not determine note scope from search hit; "
+                    "pass scope explicitly (do not assume work)."
+                )
+            found = self.corpus.get_note(note_scope, top["path"])
             if found is None:
                 raise ValueError(f"No entity or note matched: {seed!r}")
             match = found

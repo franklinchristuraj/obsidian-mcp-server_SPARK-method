@@ -60,8 +60,8 @@ class MCPProtocolHandler:
             "version": "2.1.0",
             "description": (
                 "Obsidian MCP server (v2.1.0): workspace-scoped CRUD "
-                "(personal / passion / work / parallax), "
-                "vault intelligence, capture inbox, create_event/create_engagement, impact snapshots, "
+                "(personal / passion / work / parallax), vault intelligence, capture inbox, "
+                "create_event/create_engagement (work-only), impact snapshots, "
                 "and MCP Apps (prep_card, lint_queue, snapshot_grid, debrief_form, triage_board, "
                 "promote_capture). Load MCP prompt vault_mcp_agent_guide first."
             ),
@@ -69,10 +69,10 @@ class MCPProtocolHandler:
         self.instructions = (
             "Obsidian vault MCP server. Before doing vault work, fetch the "
             "'vault_mcp_agent_guide' prompt (prompts/get) - it covers workspaces "
-            "(personal/passion/work/parallax), the entity graph tools (resolve_entity, "
-            "get_dossier, build_context, graph/timeline tools), and path/scope "
-            "conventions. Call 'workspaces' first to see which scopes this API "
-            "key can access."
+            "(personal/passion/work/parallax), write_scopes, the entity graph tools "
+            "(resolve_entity, get_dossier, build_context, graph/timeline tools), and "
+            "path/scope conventions. Call 'workspaces' first to see which scopes this "
+            "API key can read and write."
         )
         self.capabilities = MCPCapabilities(
             tools={"listChanged": False},

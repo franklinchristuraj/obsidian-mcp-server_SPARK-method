@@ -24,6 +24,9 @@ class TemplateDetector:
             # Event entity cards (work knowledge graph). More specific than the
             # bare "entities" prefix so only the event subfolder is scaffolded.
             "entities/event": "event",
+            # Parallax (and any scope) conversation + discovery notes.
+            "11_conversations": "conversation",
+            "10_discovery": "hypothesis",
         }
 
         # Vault-based template file paths (SPARK structure)
@@ -38,6 +41,8 @@ class TemplateDetector:
             "06_daily-notes": "00_system/templates/daily-journal.md",
             "12_engagements": "00_system/templates/ve-engagement.md",
             "entities/event": "00_system/templates/event_template.md",
+            "11_conversations": "00_system/templates/conversation.md",
+            "10_discovery": "00_system/templates/hypothesis.md",
         }
 
         # Engagement subtype templates (selected by engagement_type, not folder).
@@ -194,16 +199,24 @@ class TemplateDetector:
         *,
         engagement_type: str = "",
     ) -> list[str]:
-        """Primary vault template path plus legacy _template.md fallback."""
+        """Primary vault template path plus legacy _template.md and note.md fallbacks."""
         primary = self.get_template_path_for_folder(
             path, workspace_scope, engagement_type=engagement_type
         )
-        if not primary:
-            return []
-        candidates = [primary]
-        legacy = self._legacy_template_path(primary)
-        if legacy and legacy not in candidates:
-            candidates.append(legacy)
+        candidates: list[str] = []
+        if primary:
+            candidates.append(primary)
+            legacy = self._legacy_template_path(primary)
+            if legacy and legacy not in candidates:
+                candidates.append(legacy)
+        # Generic note.md fallback (parallax and any scope without a folder map).
+        note_fallback = "00_system/templates/note.md"
+        if workspace_scope:
+            ws = workspace_scope.strip().strip("/")
+            if ws:
+                note_fallback = f"{ws}/{note_fallback}"
+        if note_fallback not in candidates:
+            candidates.append(note_fallback)
         return candidates
 
     def apply_template(self, template_content: str, **variables) -> str:

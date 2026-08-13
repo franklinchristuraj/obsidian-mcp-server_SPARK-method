@@ -5,6 +5,7 @@ import json
 from typing import Any, Dict, Optional
 
 from src.tools.obsidian_tools import obsidian_tools
+from src.scope import KNOWN_SCOPES
 
 
 def payload_from_tool_result(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -27,7 +28,7 @@ async def call_vault(method_name: str, **kwargs: Any) -> Dict[str, Any]:
 def require_scope(scope: Optional[str], *, allowed: Optional[tuple] = None) -> str:
     if not scope:
         raise ValueError("scope is required and must be explicit")
-    scopes = allowed or ("personal", "passion", "work", "parallax")
+    scopes = allowed or KNOWN_SCOPES
     if scope not in scopes:
         raise ValueError(f"scope must be one of {scopes}, got {scope!r}")
     return scope
