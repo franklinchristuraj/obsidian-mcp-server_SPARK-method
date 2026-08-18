@@ -356,8 +356,13 @@ class MCPProtocolHandler:
     async def _maybe_run_as_task(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """If client supports tasks and tool is async-eligible, start a task."""
-        from .tasks import ASYNC_TOOL_NAMES, task_handle_result, task_store
+        """If client supports tasks and tool is async-eligible, enqueue a task."""
+        from .tasks import (
+            ASYNC_TOOL_NAMES,
+            auth_to_dict,
+            task_handle_result,
+            task_store,
+        )
 
         if tool_name not in ASYNC_TOOL_NAMES:
             return None
@@ -368,22 +373,12 @@ class MCPProtocolHandler:
         if ctx is None:
             return None
 
-        # Capture auth context for the background worker
-        identity = ctx.identity
-        auth_ctx = ctx
-        task_id = await task_store.create_task(identity=identity, tool_name=tool_name)
-
-        async def _worker() -> None:
-            token = workspace_ctx.set(auth_ctx)
-            try:
-                result = await self._run_obsidian_tool(tool_name, arguments)
-                await task_store.complete_task(task_id, result=result)
-            except Exception as e:
-                await task_store.complete_task(task_id, error=str(e))
-            finally:
-                workspace_ctx.reset(token)
-
-        asyncio.create_task(_worker())
+        task_id = await task_store.enqueue_task(
+            identity=ctx.identity,
+            tool_name=tool_name,
+            arguments=arguments or {},
+            auth=auth_to_dict(ctx),
+        )
         return task_handle_result(task_id, tool_name)
 
     async def _handle_tools_call(
@@ -394,10 +389,19 @@ class MCPProtocolHandler:
             raise ValueError("Missing parameters for tool call")
 
         tool_name = params.get("name")
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments", {}) or {}
 
         if not tool_name:
             raise ValueError("Missing tool name")
+
+        # MRTR gate for destructive writes (before Tasks / execution)
+        from .mrtr import gate_destructive_call
+
+        gated = gate_destructive_call(
+            tool_name, arguments, params, request_meta.get()
+        )
+        if gated is not None:
+            return gated
 
         # Execute the tool
         if tool_name == "ping":
@@ -430,11 +434,11 @@ class MCPProtocolHandler:
         if tool_name in OBSIDIAN_ROUTED_TOOL_NAMES and obsidian_tools is not None:
             try:
                 async_result = await self._maybe_run_as_task(
-                    tool_name, arguments or {}
+                    tool_name, arguments
                 )
                 if async_result is not None:
                     return async_result
-                return await self._run_obsidian_tool(tool_name, arguments or {})
+                return await self._run_obsidian_tool(tool_name, arguments)
             except Exception as e:
                 return {
                     "content": [

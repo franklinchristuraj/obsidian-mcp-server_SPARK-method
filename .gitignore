@@ -60,6 +60,16 @@ tasks.db
 tasks.db-wal
 tasks.db-shm
 
+# CIMD metadata cache
+cimd_cache.db
+cimd_cache.db-wal
+cimd_cache.db-shm
+
+# Debrief idempotency (shared across workers)
+debrief_idempotency.db
+debrief_idempotency.db-wal
+debrief_idempotency.db-shm
+
 # Virtual environment
 .venv/
 

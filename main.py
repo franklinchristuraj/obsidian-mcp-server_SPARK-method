@@ -22,6 +22,8 @@ from src.request_context import (
     build_request_meta,
     name_from_params,
 )
+from src import cimd as cimd_mod
+from src.cimd import CimdError, resolve_oauth_client
 
 # Load environment variables
 load_dotenv()
@@ -44,6 +46,9 @@ async def startup():
     await observability.init_observability()
     asyncio.create_task(observability.run_background_writer())
     await task_store.init_db()
+    from src.tasks import run_task_poller
+
+    asyncio.create_task(run_task_poller(task_store))
 
 
 async def _periodic_cleanup():
@@ -93,8 +98,11 @@ async def oauth_server_metadata():
         "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
-        "code_challenge_methods_supported": ["S256", "plain"],
+        # S256 only — plain is advertised nowhere (not implemented)
+        "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        # SEP-991 Client ID Metadata Documents (CIMD); DCR remains via registration_endpoint
+        "client_id_metadata_document_supported": True,
     }
 
 
@@ -172,7 +180,7 @@ async def oauth_authorize(
 ):
     """
     OAuth 2.0 Authorization endpoint (Authorization Code flow with PKCE).
-    Generates a stored, single-use authorization code.
+    Resolves client via CIMD (HTTPS URL client_id) or DCR.
     """
     from urllib.parse import unquote
 
@@ -182,7 +190,6 @@ async def oauth_authorize(
             status_code=400,
         )
 
-    # Decode URL-encoded client_id (Claude.ai may send "Obsidian+MCP+Server")
     if client_id:
         client_id = unquote(client_id)
 
@@ -192,18 +199,54 @@ async def oauth_authorize(
             status_code=400,
         )
 
-    # Validate that the client_id is registered (via DCR) or accept it as-is for flexibility
-    registered_client = await token_store.get_client(client_id)
-    if registered_client and redirect_uri:
-        if redirect_uri not in registered_client["redirect_uris"]:
+    if code_challenge_method and code_challenge_method != "S256":
+        return JSONResponse(
+            content={
+                "error": "invalid_request",
+                "error_description": "Only code_challenge_method=S256 is supported",
+            },
+            status_code=400,
+        )
+
+    try:
+        resolved = await resolve_oauth_client(
+            client_id, get_dcr_client=token_store.get_client
+        )
+    except CimdError as e:
+        return JSONResponse(
+            content={"error": "invalid_client", "error_description": str(e)},
+            status_code=400,
+        )
+
+    if resolved is None:
+        # Unregistered opaque client_id — reject when redirect_uri present
+        # (CIMD URLs that failed would have raised). Allow only with no redirect
+        # for rare debug flows; production Claude always sends redirect_uri.
+        if redirect_uri:
             return JSONResponse(
-                content={"error": "invalid_request", "error_description": "redirect_uri does not match registered URIs"},
+                content={
+                    "error": "invalid_client",
+                    "error_description": (
+                        "Unknown client_id. Use a CIMD HTTPS URL or register via DCR."
+                    ),
+                },
+                status_code=400,
+            )
+    elif redirect_uri:
+        if redirect_uri not in resolved["redirect_uris"]:
+            return JSONResponse(
+                content={
+                    "error": "invalid_request",
+                    "error_description": "redirect_uri does not match client metadata",
+                },
                 status_code=400,
             )
 
-    print(f"🔑 AUTHORIZE: client_id={client_id[:20]}... redirect_uri={redirect_uri} registered={'yes' if registered_client else 'no'}")
+    print(
+        f"🔑 AUTHORIZE: client_id={client_id[:40]}... redirect_uri={redirect_uri} "
+        f"source={(resolved or {}).get('source', 'none')}"
+    )
 
-    # Generate and store a cryptographically random auth code
     auth_code = generate_token()
     await token_store.store_auth_code(
         code=auth_code,
@@ -214,18 +257,19 @@ async def oauth_authorize(
     )
 
     if redirect_uri:
-        from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
-        params = {"code": auth_code}
+        from urllib.parse import urlencode
+        from fastapi.responses import RedirectResponse
+
+        base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
+        params = {"code": auth_code, "iss": base_url}
         if state:
             params["state"] = state
-        # Use standard HTTP 302 redirect — this is what OAuth clients expect
         separator = "&" if "?" in redirect_uri else "?"
         redirect_url = f"{redirect_uri}{separator}{urlencode(params)}"
-        from fastapi.responses import RedirectResponse
         print(f"↩️  REDIRECT: {redirect_url[:100]}...")
         return RedirectResponse(url=redirect_url, status_code=302)
 
-    return {"code": auth_code, "state": state}
+    return {"code": auth_code, "state": state, "iss": os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")}
 
 
 @app.post("/token")
@@ -266,15 +310,43 @@ async def oauth_token(request: Request):
                 status_code=400,
             )
 
-        # PKCE verification (S256 or plain)
-        if code_data.get("code_challenge") and code_verifier:
+        # Bind token-request client_id to the code's client_id
+        if client_id != code_data["client_id"]:
+            return JSONResponse(
+                content={
+                    "error": "invalid_grant",
+                    "error_description": "client_id does not match authorization code",
+                },
+                status_code=400,
+            )
+
+        # redirect_uri must match the one used at authorize (when both present)
+        stored_redirect = code_data.get("redirect_uri")
+        if stored_redirect and redirect_uri and str(redirect_uri) != stored_redirect:
+            return JSONResponse(
+                content={
+                    "error": "invalid_grant",
+                    "error_description": "redirect_uri does not match authorization request",
+                },
+                status_code=400,
+            )
+
+        # PKCE: required when challenge was stored
+        if code_data.get("code_challenge"):
+            if not code_verifier:
+                return JSONResponse(
+                    content={
+                        "error": "invalid_grant",
+                        "error_description": "Missing code_verifier for PKCE",
+                    },
+                    status_code=400,
+                )
             if not verify_pkce(code_data["code_challenge"], str(code_verifier)):
                 return JSONResponse(
                     content={"error": "invalid_grant", "error_description": "PKCE verification failed"},
                     status_code=400,
                 )
 
-        # Consume the code (single-use)
         await token_store.delete_auth_code(str(code))
 
         access_token = generate_token()

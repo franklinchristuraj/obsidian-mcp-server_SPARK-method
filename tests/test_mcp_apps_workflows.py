@@ -167,7 +167,7 @@ class TestDebriefIdempotency(unittest.IsolatedAsyncioTestCase):
             "failed": [],
             "idempotency_key": key,
         }
-        dmod._IDEMPOTENCY[key] = planted
+        dmod._idem_put(key, planted)
         result = await submit_debrief({"date": "2026-08-03"}, key, scope="work")
         self.assertTrue(result.get("idempotent_replay"))
         self.assertEqual(result["written"], planted["written"])

@@ -42,11 +42,19 @@ def resolve_port() -> int:
 
 if __name__ == "__main__":
     # Production configuration
+    workers_raw = os.getenv("MCP_WORKERS", "2").strip()
+    try:
+        workers = int(workers_raw)
+    except ValueError:
+        sys.exit(f"FATAL: MCP_WORKERS must be an integer, got {workers_raw!r}.")
+    if workers < 1:
+        sys.exit(f"FATAL: MCP_WORKERS must be >= 1, got {workers}.")
+
     uvicorn.run(
         "main:app",
         host=os.getenv("MCP_HOST", "127.0.0.1"),
         port=resolve_port(),
-        workers=1,  # Single worker for now
+        workers=workers,
         log_level=os.getenv("MCP_LOG_LEVEL", "info").lower(),
         access_log=True,
         reload=False,  # Disabled for production

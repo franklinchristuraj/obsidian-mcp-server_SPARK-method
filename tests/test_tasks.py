@@ -29,10 +29,17 @@ class TestTaskStore(unittest.IsolatedAsyncioTestCase):
         os.unlink(self._tmp.name)
 
     async def test_create_complete_get(self) -> None:
-        task_id = await self.store.create_task(identity="key:a", tool_name="lint_vault")
+        task_id = await self.store.enqueue_task(
+            identity="key:a",
+            tool_name="lint_vault",
+            arguments={"scope": "work"},
+            auth={"identity": "key:a", "allowed_scopes": ["work"], "role": "user"},
+        )
         got = await self.store.get_task(task_id, "key:a")
         assert got is not None
-        self.assertEqual(got["status"], "working")
+        self.assertEqual(got["status"], "queued")
+        claimed = await self.store.claim_next(worker_id="t")
+        assert claimed is not None
         await self.store.complete_task(task_id, result={"ok": True})
         got = await self.store.get_task(task_id, "key:a")
         assert got is not None
@@ -40,7 +47,12 @@ class TestTaskStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["result"], {"ok": True})
 
     async def test_identity_isolation(self) -> None:
-        task_id = await self.store.create_task(identity="key:a", tool_name="lint_vault")
+        task_id = await self.store.enqueue_task(
+            identity="key:a",
+            tool_name="lint_vault",
+            arguments={},
+            auth={"identity": "key:a", "allowed_scopes": [], "role": "user"},
+        )
         self.assertIsNone(await self.store.get_task(task_id, "key:b"))
 
 
@@ -48,7 +60,7 @@ class TestTaskHandleResult(unittest.TestCase):
     def test_handle_shape(self) -> None:
         result = task_handle_result("tid-1", "lint_vault")
         self.assertIn("taskId", result["structuredContent"])
-        self.assertEqual(result["structuredContent"]["status"], "working")
+        self.assertEqual(result["structuredContent"]["status"], "queued")
 
 
 class TestTasksHttp(unittest.TestCase):
@@ -116,6 +128,7 @@ class TestTasksHttp(unittest.TestCase):
         assert result is not None
         self.assertIn("taskId", result["structuredContent"])
         self.assertEqual(result["structuredContent"]["toolName"], "lint_vault")
+        self.assertEqual(result["structuredContent"]["status"], "queued")
 
     def test_sync_when_client_lacks_tasks(self) -> None:
         meta = RequestMeta(protocol_version="2025-06-18", is_modern=False)
