@@ -55,6 +55,28 @@ class TestFallbackSessionId(unittest.TestCase):
         self.assertNotIn(identity, session_id)
         self.assertRegex(session_id, r"^noid:[0-9a-f]{16}:\d+$")
 
+    def test_modern_correlation_uses_uuid_without_header(self) -> None:
+        a = observability.resolve_correlation_id(
+            incoming_session_id=None,
+            identity="key:x",
+            method="tools/list",
+            is_modern=True,
+        )
+        b = observability.resolve_correlation_id(
+            incoming_session_id=None,
+            identity="key:x",
+            method="tools/list",
+            is_modern=True,
+        )
+        self.assertNotEqual(a, b)
+        self.assertRegex(a, r"^[0-9a-f-]{36}$")
+
+    def test_classify_client_from_info(self) -> None:
+        self.assertEqual(
+            observability.classify_client_from_info("Claude Desktop"), "Desktop"
+        )
+        self.assertEqual(observability.classify_client_from_info(None), "unknown")
+
 
 class TestArgRedaction(unittest.TestCase):
     def test_dict_args_are_redacted_to_types(self) -> None:

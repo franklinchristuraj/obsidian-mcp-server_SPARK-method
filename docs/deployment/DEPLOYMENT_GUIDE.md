@@ -1,6 +1,15 @@
 # Obsidian MCP Server - Production Deployment Guide
 
-## 📋 Prerequisites
+## MCP protocol note (2026-07-28 dual-compat)
+
+The server speaks both legacy `initialize` clients and the stateless
+`2026-07-28` model (`server/discover`, `Mcp-Method` / `Mcp-Name` headers,
+Tasks for heavy tools). **No sticky sessions** are required. Prefer 60s
+proxy read timeouts once Task-aware clients are common; see
+[RATE_LIMITING_GUIDE.md](RATE_LIMITING_GUIDE.md) and
+[nginx/nginx_mcp_config.conf](nginx/nginx_mcp_config.conf).
+
+## Prerequisites
 
 - ✅ VPS with Ubuntu 22.04+ or Debian 11+
 - ✅ Python 3.10+

@@ -55,6 +55,11 @@ observability.db
 observability.db-wal
 observability.db-shm
 
+# MCP Tasks extension store (live SQLite — never commit)
+tasks.db
+tasks.db-wal
+tasks.db-shm
+
 # Virtual environment
 .venv/
 

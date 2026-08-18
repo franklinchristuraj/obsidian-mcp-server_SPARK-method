@@ -2,31 +2,24 @@
 
 ## Overview
 
-The MCP (Model Context Protocol) endpoint at `POST /mcp` has been implemented according to the MCP Streamable HTTP specification. This endpoint accepts JSON-RPC 2.0 requests, validates API keys, and returns compliant JSON-RPC responses.
+The MCP endpoint at `POST /mcp` implements Streamable HTTP with **dual-compat**:
+
+| Era | How clients connect |
+|-----|---------------------|
+| Legacy (≤ `2025-06-18`) | `initialize` handshake; optional `Mcp-Session-Id` echo |
+| Modern (`2026-07-28`) | Stateless; `server/discover` optional; every request carries `_meta` + `Mcp-Method` / `Mcp-Name` headers |
+
+No sticky sessions are required. `Mcp-Session-Id` is correlation-only for observability.
 
 ## Features
 
-### ✅ JSON-RPC 2.0 Compliance
-- Full JSON-RPC 2.0 request validation
-- Proper error codes (-32700 to -32603)
-- Structured error responses
-- Request ID preservation
-
-### ✅ API Key Authentication
-- Uses `src/auth.py` for validation
-- Bearer token authentication
-- Proper 401 responses for invalid/missing keys
-
-### ✅ MCP Protocol Support
-- `ping` method for connectivity testing
-- `initialize` method for protocol handshake
-- Extensible method handler system
-
-### ✅ Error Handling
-- Parse errors for invalid JSON
-- Invalid request format detection
-- Method not found responses
-- Internal error handling
+- JSON-RPC 2.0 with error codes including `-32020` (header mismatch)
+- Bearer / OAuth authentication via `src/auth.py`
+- `server/discover`, `initialize`, tools / resources / prompts
+- SEP-2549 cache hints (`ttlMs`, `cacheScope`) on list/read
+- Tasks extension (`tasks/get`, `tasks/update`) for heavy vault tools
+- MCP Apps (`io.modelcontextprotocol/ui`)
+- Legacy `GET /mcp` keepalive (compatibility only; modern clients should not depend on it)
 
 ## API Usage
 
@@ -37,180 +30,76 @@ Content-Type: application/json
 Authorization: Bearer <your-api-key>
 ```
 
-### Request Format
-```json
+### Modern request (2026-07-28)
+```
+POST /mcp
+Mcp-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: ping
+Authorization: Bearer <key>
+Content-Type: application/json
+
 {
   "jsonrpc": "2.0",
-  "method": "ping",
-  "id": 1
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "ping",
+    "arguments": {},
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {"name": "my-client", "version": "1.0"},
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {"io.modelcontextprotocol/tasks": {}}
+      }
+    }
+  }
 }
 ```
 
-### Response Format
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "message": "pong",
-    "timestamp": "2025-09-22T00:00:00Z"
-  },
-  "id": 1
-}
-```
+Header values must match the JSON-RPC body or the server returns `-32020`.
 
-## Supported Methods
-
-### `ping`
-Simple connectivity test.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "ping",
-  "id": 1
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "message": "pong",
-    "timestamp": "2025-09-22T00:00:00Z"
-  },
-  "id": 1
-}
-```
-
-### `initialize`
-MCP protocol initialization handshake.
-
-**Request:**
+### Legacy initialize
 ```json
 {
   "jsonrpc": "2.0",
   "method": "initialize",
   "params": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-06-18",
     "capabilities": {},
-    "clientInfo": {
-      "name": "test-client",
-      "version": "1.0.0"
-    }
+    "clientInfo": {"name": "test-client", "version": "1.0.0"}
   },
   "id": 2
 }
 ```
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "protocolVersion": "2024-11-05",
-    "capabilities": {
-      "tools": {},
-      "resources": {},
-      "prompts": {},
-      "logging": {}
-    },
-    "serverInfo": {
-      "name": "obsidian-mcp-server",
-      "version": "1.0.0"
-    }
-  },
-  "id": 2
-}
-```
+### `server/discover`
+Stateless capability probe (no session). Returns `protocolVersion`, `capabilities` (including UI + Tasks extensions), `serverInfo`, and `instructions`.
+
+### Cache hints
+`tools/list`, `prompts/list`, and `resources/list` include:
+- `ttlMs` — freshness hint in milliseconds
+- `cacheScope`: `"private"`
+
+### Tasks (heavy tools)
+When the client advertises `extensions["io.modelcontextprotocol/tasks"]`, these tools return a task handle immediately:
+
+- `lint_vault`, `build_context`, `impact_rollup`, `graph_health`, `get_dossier`
+
+Poll with `tasks/get` `{ "taskId": "..." }`. Cancel via `tasks/update` with `status: "cancelled"`.
+Without Tasks capability, those tools still run synchronously (legacy behavior).
 
 ## Error Responses
 
-### Parse Error (-32700)
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32700,
-    "message": "Parse error"
-  },
-  "id": null
-}
-```
+| Code | Meaning |
+|------|---------|
+| -32700 | Parse error |
+| -32600 | Invalid Request |
+| -32601 | Method not found |
+| -32602 | Invalid params |
+| -32603 | Internal error |
+| -32020 | Header mismatch (`Mcp-Method` / `Mcp-Name`) |
 
-### Invalid Request (-32600)
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32600,
-    "message": "Invalid Request",
-    "data": "Invalid or missing jsonrpc version"
-  },
-  "id": 1
-}
-```
+## Authentication
 
-### Method Not Found (-32601)
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32601,
-    "message": "Method not found",
-    "data": "Method not found: unknown_method"
-  },
-  "id": 1
-}
-```
-
-## Testing
-
-Run the test script to verify endpoint functionality:
-
-```bash
-# Set environment variables
-export MCP_API_KEY="your-secret-key"
-export MCP_HOST="127.0.0.1"
-export MCP_PORT="8888"
-
-# Run tests
-python3 test_mcp_endpoint.py
-```
-
-The test script will verify:
-1. Health endpoint accessibility
-2. Valid JSON-RPC requests
-3. Error handling for invalid requests
-4. Authentication validation
-5. Method not found responses
-
-## Security Features
-
-- **API Key Validation**: All requests require valid Bearer token
-- **Input Validation**: JSON-RPC format strictly validated
-- **Error Isolation**: Internal errors don't expose sensitive data
-- **CORS Ready**: Can be extended with CORS headers if needed
-
-## Extending the Endpoint
-
-To add new MCP methods, extend the `handle_jsonrpc_method` function in `main.py`:
-
-```python
-async def handle_jsonrpc_method(method: str, params: Optional[Any] = None) -> Any:
-    if method == "your_new_method":
-        # Implement your method logic
-        return {"result": "your_response"}
-    # ... existing methods
-```
-
-## Configuration
-
-Set the following environment variables:
-
-```bash
-MCP_HOST=127.0.0.1      # Server host
-MCP_PORT=8888           # Server port  
-MCP_API_KEY=secret-key  # API authentication key
-```
+Requires a valid Bearer token (workspace key, static `MCP_API_KEY`, or OAuth access token).

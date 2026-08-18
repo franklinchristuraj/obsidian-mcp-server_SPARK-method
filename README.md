@@ -7,7 +7,8 @@ A Model Context Protocol (MCP) server providing AI assistants with full access t
 - **Endpoint**: `https://mcp.ziksaka.com/mcp`
 - **Auth**: OAuth 2.0 with Dynamic Client Registration (DCR) + PKCE S256
 - **Service**: systemd user service (`obsidian-mcp.service`)
-- **Protocol**: MCP 2024-11-05 / JSON-RPC 2.0
+- **Protocol**: MCP dual-compat (`2024-11-05` … `2026-07-28`) / JSON-RPC 2.0
+- **Extensions**: MCP Apps (UI) + Tasks (async heavy vault tools)
 
 ## Tools (25 total)
 

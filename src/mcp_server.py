@@ -2,11 +2,14 @@
 MCP Protocol Server Implementation
 Handles Model Context Protocol with SSE streaming support
 """
+import copy
 import json
 import asyncio
 import time
 from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from .types import MCPMessageType, MCPTool, MCPResource, MCPCapabilities, MCPPrompt
+from .request_context import request_meta
+from .scope import workspace_ctx
 
 # prompts/get "description" must match each prompt (not a generic template blurb)
 _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
@@ -42,7 +45,12 @@ class MCPProtocolHandler:
 
     # Protocol versions this server understands, newest first. The first
     # entry is offered to clients that don't request a specific version.
-    SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+    SUPPORTED_PROTOCOL_VERSIONS = (
+        "2026-07-28",
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05",
+    )
 
     # Page sizes for cursor pagination (spec 2025-06-18). Tools page size is
     # set well above the current tool count so today's non-paginating clients
@@ -50,6 +58,12 @@ class MCPProtocolHandler:
     # roots + pins only (~4–8 items); page size still chunks if that grows.
     TOOLS_PAGE_SIZE = 200
     RESOURCES_PAGE_SIZE = 200
+
+    # SEP-2549 cache hints (ttlMs / cacheScope)
+    TOOLS_LIST_TTL_MS = 300_000
+    PROMPTS_LIST_TTL_MS = 300_000
+    RESOURCES_LIST_TTL_MS = 60_000
+    RESOURCES_READ_TTL_MS = 300_000
 
     def __init__(self):
         self.session_id: Optional[str] = None
@@ -84,10 +98,12 @@ class MCPProtocolHandler:
                 # SEP-1865 MCP Apps
                 "io.modelcontextprotocol/ui": {
                     "mimeTypes": ["text/html;profile=mcp-app"],
-                }
+                },
+                # SEP-2663 Tasks
+                "io.modelcontextprotocol/tasks": {},
             },
         )
-        # Last client capabilities from initialize (diagnostics / future gating).
+        # Deprecated: prefer request_meta ContextVar. Kept for legacy diagnostics.
         self.client_capabilities: Dict[str, Any] = {}
 
         # Register available tools from obsidian_tools
@@ -142,6 +158,11 @@ class MCPProtocolHandler:
         except Exception as e:
             print(f"Warning: Could not load Obsidian prompts: {e}")
 
+        # Frozen wire snapshots so tools/list and prompts/list avoid
+        # re-serializing schemas on every call (SEP-2549 friendly).
+        self._tools_list_snapshot: List[Dict[str, Any]] = self._build_tools_snapshot()
+        self._prompts_list_snapshot: List[Dict[str, Any]] = self._build_prompts_snapshot()
+
     async def handle_request(
         self, method: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -152,6 +173,8 @@ class MCPProtocolHandler:
         try:
             if method == MCPMessageType.INITIALIZE.value:
                 return await self._handle_initialize(params)
+            elif method == MCPMessageType.SERVER_DISCOVER.value:
+                return await self._handle_server_discover(params)
             elif method == MCPMessageType.PING.value:
                 return await self._handle_ping(params)
             elif method == MCPMessageType.TOOLS_LIST.value:
@@ -170,6 +193,10 @@ class MCPProtocolHandler:
                 return await self._handle_prompts_get(params)
             elif method == MCPMessageType.COMPLETION_COMPLETE.value:
                 return await self._handle_completion_complete(params)
+            elif method == MCPMessageType.TASKS_GET.value:
+                return await self._handle_tasks_get(params)
+            elif method == MCPMessageType.TASKS_UPDATE.value:
+                return await self._handle_tasks_update(params)
             elif method == MCPMessageType.NOTIFICATIONS_INITIALIZED.value:
                 return await self._handle_notifications_initialized(params)
             else:
@@ -181,26 +208,7 @@ class MCPProtocolHandler:
         except Exception as e:
             raise Exception(f"Error handling {method}: {str(e)}")
 
-    async def _handle_initialize(
-        self, params: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Handle MCP initialization.
-
-        Per spec, a server that doesn't support the client's requested
-        protocolVersion should respond with a version it does support (rather
-        than silently claiming the client's version) so the client can decide
-        whether to proceed or disconnect.
-        """
-        negotiated_version = self.protocol_version
-        if params:
-            requested_version = params.get("protocolVersion")
-            if requested_version in self.SUPPORTED_PROTOCOL_VERSIONS:
-                negotiated_version = requested_version
-            # Persist client caps (including unknown extension blocks); never reject.
-            client_caps = params.get("capabilities")
-            if isinstance(client_caps, dict):
-                self.client_capabilities = dict(client_caps)
-
+    def _capabilities_dict(self) -> Dict[str, Any]:
         caps: Dict[str, Any] = {
             "tools": self.capabilities.tools,
             "resources": self.capabilities.resources,
@@ -210,10 +218,78 @@ class MCPProtocolHandler:
         }
         if self.capabilities.extensions:
             caps["extensions"] = self.capabilities.extensions
+        return caps
+
+    def _build_tools_snapshot(self) -> List[Dict[str, Any]]:
+        tool_dicts: List[Dict[str, Any]] = []
+        for tool in self.tools:
+            tool_dict: Dict[str, Any] = {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.inputSchema,
+            }
+            if tool.annotations:
+                tool_dict["annotations"] = tool.annotations
+            if tool.outputSchema:
+                tool_dict["outputSchema"] = tool.outputSchema
+            if tool.meta:
+                tool_dict["_meta"] = tool.meta
+            tool_dicts.append(tool_dict)
+        return tool_dicts
+
+    def _build_prompts_snapshot(self) -> List[Dict[str, Any]]:
+        prompt_list: List[Dict[str, Any]] = []
+        for prompt in self.prompts:
+            prompt_dict: Dict[str, Any] = {
+                "name": prompt.name,
+                "description": prompt.description,
+            }
+            if prompt.arguments:
+                prompt_dict["arguments"] = prompt.arguments
+            prompt_list.append(prompt_dict)
+        return prompt_list
+
+    def _negotiate_version(self, requested: Optional[str]) -> str:
+        if requested in self.SUPPORTED_PROTOCOL_VERSIONS:
+            return requested  # type: ignore[return-value]
+        return self.protocol_version
+
+    async def _handle_initialize(
+        self, params: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Handle legacy MCP initialization handshake."""
+        negotiated_version = self.protocol_version
+        if params:
+            requested_version = params.get("protocolVersion")
+            negotiated_version = self._negotiate_version(requested_version)
+            client_caps = params.get("capabilities")
+            if isinstance(client_caps, dict):
+                self.client_capabilities = dict(client_caps)
+                meta = request_meta.get()
+                if meta is not None:
+                    meta.client_capabilities = dict(client_caps)
 
         return {
             "protocolVersion": negotiated_version,
-            "capabilities": caps,
+            "capabilities": self._capabilities_dict(),
+            "serverInfo": self.server_info,
+            "instructions": self.instructions,
+        }
+
+    async def _handle_server_discover(
+        self, params: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Stateless capability discovery (2026-07-28). No session state."""
+        meta = request_meta.get()
+        requested = None
+        if meta and meta.protocol_version:
+            requested = meta.protocol_version
+        elif isinstance(params, dict):
+            requested = params.get("protocolVersion")
+        negotiated = self._negotiate_version(requested)
+        return {
+            "protocolVersion": negotiated,
+            "capabilities": self._capabilities_dict(),
             "serverInfo": self.server_info,
             "instructions": self.instructions,
         }
@@ -250,27 +326,65 @@ class MCPProtocolHandler:
     ) -> Dict[str, Any]:
         """List available tools"""
         cursor = (params or {}).get("cursor")
-        page, next_cursor = self._paginate(self.tools, cursor, self.TOOLS_PAGE_SIZE)
+        page, next_cursor = self._paginate(
+            self._tools_list_snapshot, cursor, self.TOOLS_PAGE_SIZE
+        )
 
-        tool_dicts = []
-        for tool in page:
-            tool_dict: Dict[str, Any] = {
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": tool.inputSchema,
-            }
-            if tool.annotations:
-                tool_dict["annotations"] = tool.annotations
-            if tool.outputSchema:
-                tool_dict["outputSchema"] = tool.outputSchema
-            if tool.meta:
-                tool_dict["_meta"] = tool.meta
-            tool_dicts.append(tool_dict)
-
-        result: Dict[str, Any] = {"tools": tool_dicts}
+        result: Dict[str, Any] = {
+            "tools": copy.deepcopy(page),
+            "ttlMs": self.TOOLS_LIST_TTL_MS,
+            "cacheScope": "private",
+        }
         if next_cursor is not None:
             result["nextCursor"] = next_cursor
         return result
+
+    async def _run_obsidian_tool(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        from .tools.obsidian_tools import obsidian_tools
+
+        result = await obsidian_tools.execute_tool(tool_name, arguments)
+        if (
+            isinstance(result, dict)
+            and "metadata" in result
+            and "structuredContent" not in result
+        ):
+            result["structuredContent"] = result["metadata"]
+        return result
+
+    async def _maybe_run_as_task(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """If client supports tasks and tool is async-eligible, start a task."""
+        from .tasks import ASYNC_TOOL_NAMES, task_handle_result, task_store
+
+        if tool_name not in ASYNC_TOOL_NAMES:
+            return None
+        meta = request_meta.get()
+        if meta is None or not meta.supports_tasks():
+            return None
+        ctx = workspace_ctx.get()
+        if ctx is None:
+            return None
+
+        # Capture auth context for the background worker
+        identity = ctx.identity
+        auth_ctx = ctx
+        task_id = await task_store.create_task(identity=identity, tool_name=tool_name)
+
+        async def _worker() -> None:
+            token = workspace_ctx.set(auth_ctx)
+            try:
+                result = await self._run_obsidian_tool(tool_name, arguments)
+                await task_store.complete_task(task_id, result=result)
+            except Exception as e:
+                await task_store.complete_task(task_id, error=str(e))
+            finally:
+                workspace_ctx.reset(token)
+
+        asyncio.create_task(_worker())
+        return task_handle_result(task_id, tool_name)
 
     async def _handle_tools_call(
         self, params: Optional[Dict[str, Any]]
@@ -315,7 +429,12 @@ class MCPProtocolHandler:
 
         if tool_name in OBSIDIAN_ROUTED_TOOL_NAMES and obsidian_tools is not None:
             try:
-                result = await obsidian_tools.execute_tool(tool_name, arguments)
+                async_result = await self._maybe_run_as_task(
+                    tool_name, arguments or {}
+                )
+                if async_result is not None:
+                    return async_result
+                return await self._run_obsidian_tool(tool_name, arguments or {})
             except Exception as e:
                 return {
                     "content": [
@@ -326,17 +445,6 @@ class MCPProtocolHandler:
                     ],
                     "isError": True,
                 }
-            # Promote the tool's own "metadata" payload (used across the
-            # codebase, e.g. _json_result) to the spec's "structuredContent"
-            # field too, so clients that only look for the standard field
-            # still get typed data instead of having to re-parse the text blob.
-            if (
-                isinstance(result, dict)
-                and "metadata" in result
-                and "structuredContent" not in result
-            ):
-                result["structuredContent"] = result["metadata"]
-            return result
 
         try:
             from .apps.registry import APP_TOOL_NAMES, execute_app_tool
@@ -395,7 +503,9 @@ class MCPProtocolHandler:
                     **({"_meta": resource.meta} if resource.meta else {}),
                 }
                 for resource in page
-            ]
+            ],
+            "ttlMs": self.RESOURCES_LIST_TTL_MS,
+            "cacheScope": "private",
         }
         if next_cursor is not None:
             result["nextCursor"] = next_cursor
@@ -438,6 +548,10 @@ class MCPProtocolHandler:
             if content.metadata:
                 result["contents"][0]["metadata"] = content.metadata
                 result["contents"][0]["_meta"] = content.metadata
+
+            # SEP-2549 cache hints on resources/read (UI bundles especially)
+            result["ttlMs"] = self.RESOURCES_READ_TTL_MS
+            result["cacheScope"] = "private"
 
             return result
 
@@ -564,17 +678,54 @@ class MCPProtocolHandler:
         self, params: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """List all available prompts"""
-        prompt_list = []
-        for prompt in self.prompts:
-            prompt_dict = {
-                "name": prompt.name,
-                "description": prompt.description,
-            }
-            if prompt.arguments:
-                prompt_dict["arguments"] = prompt.arguments
-            prompt_list.append(prompt_dict)
+        return {
+            "prompts": copy.deepcopy(self._prompts_list_snapshot),
+            "ttlMs": self.PROMPTS_LIST_TTL_MS,
+            "cacheScope": "private",
+        }
 
-        return {"prompts": prompt_list}
+    async def _handle_tasks_get(
+        self, params: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Poll a background task (io.modelcontextprotocol/tasks)."""
+        from .tasks import task_store
+
+        if not params or not params.get("taskId"):
+            raise ValueError("Missing taskId")
+        ctx = workspace_ctx.get()
+        if ctx is None:
+            raise ValueError("Not authenticated")
+        task = await task_store.get_task(str(params["taskId"]), ctx.identity)
+        if task is None:
+            raise ValueError(f"Unknown taskId: {params['taskId']}")
+        return task
+
+    async def _handle_tasks_update(
+        self, params: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Cancel or acknowledge a task. MRTR input is a later follow-up."""
+        from .tasks import STATUS_CANCELLED, task_store
+
+        if not params or not params.get("taskId"):
+            raise ValueError("Missing taskId")
+        ctx = workspace_ctx.get()
+        if ctx is None:
+            raise ValueError("Not authenticated")
+        action = (params.get("status") or params.get("action") or "").lower()
+        if action in ("cancelled", "canceled", "cancel"):
+            ok = await task_store.cancel_task(str(params["taskId"]), ctx.identity)
+            if not ok:
+                task = await task_store.get_task(str(params["taskId"]), ctx.identity)
+                if task is None:
+                    raise ValueError(f"Unknown taskId: {params['taskId']}")
+                return task
+            task = await task_store.get_task(str(params["taskId"]), ctx.identity)
+            return task or {"taskId": params["taskId"], "status": STATUS_CANCELLED}
+        # No-op update: return current state
+        task = await task_store.get_task(str(params["taskId"]), ctx.identity)
+        if task is None:
+            raise ValueError(f"Unknown taskId: {params['taskId']}")
+        return task
 
     async def _handle_prompts_get(
         self, params: Optional[Dict[str, Any]]
