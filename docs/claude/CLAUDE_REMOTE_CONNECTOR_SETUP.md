@@ -7,16 +7,16 @@
 | MCP endpoint | `https://mcp.ziksaka.com/mcp` |
 | OAuth metadata | `https://mcp.ziksaka.com/.well-known/oauth-authorization-server` |
 | Tools | 17 |
-| Auth | OAuth 2.0 DCR + PKCE S256 (Claude.ai) or static Bearer token |
+| Auth | OAuth 2.0 CIMD + DCR fallback + PKCE S256 (Claude.ai) or static Bearer token |
 
 ## Claude.ai Connector (OAuth)
 
 1. Go to **claude.ai → Settings → Connectors → Add custom connector**
 2. Set **Remote MCP Server URL**: `https://mcp.ziksaka.com/mcp`
-3. Leave OAuth Client ID / Secret empty — Claude.ai self-registers via DCR
+3. Leave OAuth Client ID / Secret empty
 4. Click connect and complete the browser OAuth popup
 
-Claude.ai auto-discovers the OAuth endpoints from `/.well-known/oauth-authorization-server` and registers itself. No manual client credentials needed.
+Claude.ai discovers `/.well-known/oauth-authorization-server`. Preferred identity is **CIMD** (`client_id_metadata_document_supported: true`). If the client still uses Dynamic Client Registration, `registration_endpoint` remains available as a fallback.
 
 ## Claude Desktop (Bearer token)
 

@@ -5,9 +5,10 @@ A Model Context Protocol (MCP) server providing AI assistants with full access t
 ## Status: Production
 
 - **Endpoint**: `https://mcp.ziksaka.com/mcp`
-- **Auth**: OAuth 2.0 with Dynamic Client Registration (DCR) + PKCE S256
+- **Auth**: OAuth 2.0 CIMD + DCR fallback + PKCE S256
 - **Service**: systemd user service (`obsidian-mcp.service`)
-- **Protocol**: MCP 2024-11-05 / JSON-RPC 2.0
+- **Protocol**: MCP dual-compat (`2024-11-05` … `2026-07-28`) / JSON-RPC 2.0
+- **Extensions**: MCP Apps (UI) + Tasks (async heavy vault tools)
 
 ## Tools (25 total)
 
@@ -147,15 +148,16 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 
 ## OAuth Flow (Claude.ai)
 
-Claude.ai uses Dynamic Client Registration (RFC 7591):
+The server supports **Client ID Metadata Documents (CIMD)** and keeps **DCR** as a fallback:
 
-1. Discovers `/.well-known/oauth-authorization-server` → finds `registration_endpoint`
-2. Registers via `POST /register` (public client, no secret)
-3. User authorises at `/authorize` with PKCE S256
-4. Callback to `https://claude.ai/api/mcp/auth_callback`
-5. Token via `POST /token`
+1. Discovers `/.well-known/oauth-authorization-server`
+   - Prefer CIMD when `client_id_metadata_document_supported` is true
+   - Else register via `POST /register` (DCR)
+2. User authorises at `/authorize` with PKCE S256 (`iss` returned on redirect)
+3. Callback to the client redirect URI
+4. Token via `POST /token` (client_id + redirect_uri bound to the auth code)
 
-**Critical:** `registration_endpoint` must be in OAuth metadata or Claude.ai never opens the browser popup.
+**Critical:** Keep `registration_endpoint` in OAuth metadata so older Claude.ai builds that still use DCR can connect.
 
 ## Project Structure
 

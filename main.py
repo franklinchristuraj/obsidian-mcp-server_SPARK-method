@@ -16,6 +16,14 @@ from src.scope import workspace_ctx
 from src.mcp_server import mcp_handler, MCPProtocolHandler
 from src.token_store import TokenStore, generate_token, verify_pkce
 from src import observability
+from src import request_context
+from src.tasks import task_store
+from src.request_context import (
+    build_request_meta,
+    name_from_params,
+)
+from src import cimd as cimd_mod
+from src.cimd import CimdError, resolve_oauth_client
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +45,10 @@ async def startup():
     asyncio.create_task(_periodic_cleanup())
     await observability.init_observability()
     asyncio.create_task(observability.run_background_writer())
+    await task_store.init_db()
+    from src.tasks import run_task_poller
+
+    asyncio.create_task(run_task_poller(task_store))
 
 
 async def _periodic_cleanup():
@@ -86,8 +98,11 @@ async def oauth_server_metadata():
         "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
-        "code_challenge_methods_supported": ["S256", "plain"],
+        # S256 only — plain is advertised nowhere (not implemented)
+        "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        # SEP-991 Client ID Metadata Documents (CIMD); DCR remains via registration_endpoint
+        "client_id_metadata_document_supported": True,
     }
 
 
@@ -165,7 +180,7 @@ async def oauth_authorize(
 ):
     """
     OAuth 2.0 Authorization endpoint (Authorization Code flow with PKCE).
-    Generates a stored, single-use authorization code.
+    Resolves client via CIMD (HTTPS URL client_id) or DCR.
     """
     from urllib.parse import unquote
 
@@ -175,7 +190,6 @@ async def oauth_authorize(
             status_code=400,
         )
 
-    # Decode URL-encoded client_id (Claude.ai may send "Obsidian+MCP+Server")
     if client_id:
         client_id = unquote(client_id)
 
@@ -185,18 +199,54 @@ async def oauth_authorize(
             status_code=400,
         )
 
-    # Validate that the client_id is registered (via DCR) or accept it as-is for flexibility
-    registered_client = await token_store.get_client(client_id)
-    if registered_client and redirect_uri:
-        if redirect_uri not in registered_client["redirect_uris"]:
+    if code_challenge_method and code_challenge_method != "S256":
+        return JSONResponse(
+            content={
+                "error": "invalid_request",
+                "error_description": "Only code_challenge_method=S256 is supported",
+            },
+            status_code=400,
+        )
+
+    try:
+        resolved = await resolve_oauth_client(
+            client_id, get_dcr_client=token_store.get_client
+        )
+    except CimdError as e:
+        return JSONResponse(
+            content={"error": "invalid_client", "error_description": str(e)},
+            status_code=400,
+        )
+
+    if resolved is None:
+        # Unregistered opaque client_id — reject when redirect_uri present
+        # (CIMD URLs that failed would have raised). Allow only with no redirect
+        # for rare debug flows; production Claude always sends redirect_uri.
+        if redirect_uri:
             return JSONResponse(
-                content={"error": "invalid_request", "error_description": "redirect_uri does not match registered URIs"},
+                content={
+                    "error": "invalid_client",
+                    "error_description": (
+                        "Unknown client_id. Use a CIMD HTTPS URL or register via DCR."
+                    ),
+                },
+                status_code=400,
+            )
+    elif redirect_uri:
+        if redirect_uri not in resolved["redirect_uris"]:
+            return JSONResponse(
+                content={
+                    "error": "invalid_request",
+                    "error_description": "redirect_uri does not match client metadata",
+                },
                 status_code=400,
             )
 
-    print(f"🔑 AUTHORIZE: client_id={client_id[:20]}... redirect_uri={redirect_uri} registered={'yes' if registered_client else 'no'}")
+    print(
+        f"🔑 AUTHORIZE: client_id={client_id[:40]}... redirect_uri={redirect_uri} "
+        f"source={(resolved or {}).get('source', 'none')}"
+    )
 
-    # Generate and store a cryptographically random auth code
     auth_code = generate_token()
     await token_store.store_auth_code(
         code=auth_code,
@@ -207,18 +257,19 @@ async def oauth_authorize(
     )
 
     if redirect_uri:
-        from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
-        params = {"code": auth_code}
+        from urllib.parse import urlencode
+        from fastapi.responses import RedirectResponse
+
+        base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
+        params = {"code": auth_code, "iss": base_url}
         if state:
             params["state"] = state
-        # Use standard HTTP 302 redirect — this is what OAuth clients expect
         separator = "&" if "?" in redirect_uri else "?"
         redirect_url = f"{redirect_uri}{separator}{urlencode(params)}"
-        from fastapi.responses import RedirectResponse
         print(f"↩️  REDIRECT: {redirect_url[:100]}...")
         return RedirectResponse(url=redirect_url, status_code=302)
 
-    return {"code": auth_code, "state": state}
+    return {"code": auth_code, "state": state, "iss": os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")}
 
 
 @app.post("/token")
@@ -259,15 +310,43 @@ async def oauth_token(request: Request):
                 status_code=400,
             )
 
-        # PKCE verification (S256 or plain)
-        if code_data.get("code_challenge") and code_verifier:
+        # Bind token-request client_id to the code's client_id
+        if client_id != code_data["client_id"]:
+            return JSONResponse(
+                content={
+                    "error": "invalid_grant",
+                    "error_description": "client_id does not match authorization code",
+                },
+                status_code=400,
+            )
+
+        # redirect_uri must match the one used at authorize (when both present)
+        stored_redirect = code_data.get("redirect_uri")
+        if stored_redirect and redirect_uri and str(redirect_uri) != stored_redirect:
+            return JSONResponse(
+                content={
+                    "error": "invalid_grant",
+                    "error_description": "redirect_uri does not match authorization request",
+                },
+                status_code=400,
+            )
+
+        # PKCE: required when challenge was stored
+        if code_data.get("code_challenge"):
+            if not code_verifier:
+                return JSONResponse(
+                    content={
+                        "error": "invalid_grant",
+                        "error_description": "Missing code_verifier for PKCE",
+                    },
+                    status_code=400,
+                )
             if not verify_pkce(code_data["code_challenge"], str(code_verifier)):
                 return JSONResponse(
                     content={"error": "invalid_grant", "error_description": "PKCE verification failed"},
                     status_code=400,
                 )
 
-        # Consume the code (single-use)
         await token_store.delete_auth_code(str(code))
 
         access_token = generate_token()
@@ -343,6 +422,8 @@ JSONRPC_ERRORS = {
     "METHOD_NOT_FOUND": {"code": -32601, "message": "Method not found"},
     "INVALID_PARAMS": {"code": -32602, "message": "Invalid params"},
     "INTERNAL_ERROR": {"code": -32603, "message": "Internal error"},
+    # SEP-2243: Mcp-Method / Mcp-Name disagree with JSON-RPC body
+    "HEADER_MISMATCH": {"code": -32020, "message": "Header mismatch"},
 }
 
 
@@ -436,9 +517,11 @@ async def debug_endpoint(_auth=Depends(verify_api_key)):
 @app.get("/mcp")
 async def mcp_sse_endpoint(request: Request, _auth=Depends(verify_api_key)):
     """
-    MCP Streamable HTTP GET endpoint (SSE channel).
-    Required by the MCP spec for server-to-client event streaming.
-    Keeps the connection open and sends a heartbeat so the client knows it's alive.
+    Legacy MCP Streamable HTTP GET endpoint (SSE keepalive).
+
+    Kept for older hosts that open a long-lived GET channel. Modern
+    2026-07-28 clients should not depend on this; prefer opt-in
+    subscriptions/listen when that is implemented.
     """
     async def event_stream():
         # Send an initial endpoint event so Claude.ai knows the SSE channel is up
@@ -511,15 +594,59 @@ def _log_tools_call(
         pass
 
 
+def _validate_mcp_headers(
+    request: Request,
+    method: str,
+    params: Optional[Dict[str, Any]],
+    is_modern: bool,
+    request_id: Optional[Any],
+) -> Optional[Dict[str, Any]]:
+    """Validate Mcp-Method / Mcp-Name against the JSON-RPC body (SEP-2243)."""
+    mcp_method = request.headers.get("mcp-method")
+    mcp_name = request.headers.get("mcp-name")
+
+    if is_modern and not mcp_method:
+        return create_jsonrpc_error(
+            "HEADER_MISMATCH",
+            "Mcp-Method header required for protocol 2026-07-28",
+            request_id,
+        )
+
+    if mcp_method is not None and mcp_method != method:
+        return create_jsonrpc_error(
+            "HEADER_MISMATCH",
+            f"Mcp-Method={mcp_method!r} does not match body method={method!r}",
+            request_id,
+        )
+
+    needs_name = method in ("tools/call", "prompts/get", "resources/read")
+    body_name = name_from_params(method, params)
+
+    if needs_name:
+        if is_modern and not mcp_name:
+            return create_jsonrpc_error(
+                "HEADER_MISMATCH",
+                f"Mcp-Name header required for {method}",
+                request_id,
+            )
+        if mcp_name is not None and body_name is not None and mcp_name != body_name:
+            return create_jsonrpc_error(
+                "HEADER_MISMATCH",
+                f"Mcp-Name={mcp_name!r} does not match body name={body_name!r}",
+                request_id,
+            )
+    return None
+
+
 @app.post("/mcp")
 async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
     """
-    MCP Streamable HTTP endpoint with SSE support
-    Accepts JSON-RPC 2.0 requests and returns appropriate responses
-    Supports both single JSON responses and Server-Sent Events streaming
+    MCP Streamable HTTP endpoint with SSE support.
+
+    Dual-compat: legacy initialize + Mcp-Session-Id clients, and
+    2026-07-28 stateless requests with _meta + Mcp-Method/Mcp-Name headers.
     """
     try:
-        # Parse request body and log for debugging
         body = await request.body()
         print(
             f"📥 MCP Request from {request.client.host if request.client else 'unknown'}"
@@ -533,7 +660,6 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
                 content=create_jsonrpc_error("PARSE_ERROR"), status_code=400
             )
 
-        # Validate JSON-RPC format
         validation_error = validate_jsonrpc_request(request_data)
         if validation_error:
             return JSONResponse(content=validation_error, status_code=400)
@@ -542,67 +668,70 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
         method = request_data["method"]
         params = request_data.get("params")
 
-        # Check if client wants streaming (via Accept header)
         accept_header = request.headers.get("accept", "")
         wants_streaming = "text/event-stream" in accept_header
 
-        # Session correlation: this server has no native MCP session id, so
-        # mint one on initialize and expect the client to echo it back via
-        # the Mcp-Session-Id header on every later call (Streamable HTTP
-        # spec behavior — no client-side change needed for compliant
-        # clients). Non-compliant/unknown clients fall back to a coarse
-        # time-window bucket keyed by API-key identity.
+        header_protocol = request.headers.get("mcp-protocol-version")
+        req_meta = build_request_meta(
+            params=params if isinstance(params, dict) else None,
+            header_protocol_version=header_protocol,
+        )
+
+        header_err = _validate_mcp_headers(
+            request,
+            method,
+            params if isinstance(params, dict) else None,
+            req_meta.is_modern,
+            request_id,
+        )
+        if header_err:
+            return JSONResponse(content=header_err, status_code=400)
+
         incoming_session_id = request.headers.get("mcp-session-id")
-        if method == "initialize":
-            session_id = incoming_session_id or str(uuid.uuid4())
+        correlation_id = observability.resolve_correlation_id(
+            incoming_session_id=incoming_session_id,
+            identity=auth.identity,
+            method=method,
+            is_modern=req_meta.is_modern,
+        )
+        correlation_id = _header_safe(correlation_id)
+
+        client_name = (req_meta.client_info or {}).get("name")
+        if client_name:
+            obs_client = observability.classify_client_from_info(str(client_name))
         else:
-            session_id = incoming_session_id or observability.fallback_session_id(
-                auth.identity
-            )
-        # The fallback id embeds the caller identity (key label or OAuth
-        # client_id), which can carry arbitrary Unicode. Header values must be
-        # latin-1 encodable or Starlette raises while building the response,
-        # which aborts it mid-flight and drops the client's session.
-        session_id = _header_safe(session_id)
-        obs_client = observability.resolve_client(session_id)
+            obs_client = observability.resolve_client(correlation_id)
+
+        resp_headers = {"Mcp-Session-Id": correlation_id}
 
         ctx_token = workspace_ctx.set(auth)
         obs_token = observability.call_context.set(
-            observability.CallContext(session_id=session_id, client=obs_client)
+            observability.CallContext(session_id=correlation_id, client=obs_client)
         )
+        meta_token = request_context.request_meta.set(req_meta)
         tool_call_start = time.monotonic()
         try:
-            # Use the new MCP protocol handler (tools read workspace_ctx)
             result = await mcp_handler.handle_request(method, params)
 
             if method == "initialize" and isinstance(params, dict):
                 client_info = params.get("clientInfo") or {}
                 observability.register_session_client(
-                    session_id, client_info.get("name")
+                    correlation_id, client_info.get("name")
                 )
 
             if method == "tools/call":
                 _log_tools_call(
-                    session_id, obs_client, params, result, tool_call_start,
+                    correlation_id, obs_client, params, result, tool_call_start,
                     status="ok", error=None,
                 )
 
-            # Handle notifications (which return None and should not send a response)
             if method.startswith("notifications/") and result is None:
-                # Streamable HTTP: notification-only input gets 202 Accepted with
-                # no body. JSONResponse(None) would emit a 4-byte "null" body that
-                # contradicts the empty-body status and aborts the ASGI response.
-                return Response(
-                    status_code=202, headers={"Mcp-Session-Id": session_id}
-                )
+                return Response(status_code=202, headers=resp_headers)
 
             response = create_jsonrpc_response(result=result, request_id=request_id)
-
-            # Determine if we should stream the response
             should_stream = wants_streaming and _should_enable_streaming(result)
 
             if should_stream:
-                # Return SSE streaming response
                 return StreamingResponse(
                     create_sse_stream(response, result, enable_streaming=True),
                     media_type="text/event-stream",
@@ -610,46 +739,43 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
                         "Cache-Control": "no-cache",
                         "Connection": "keep-alive",
                         "Access-Control-Allow-Origin": "*",
-                        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                        "Mcp-Session-Id": session_id,
+                        "Access-Control-Allow-Headers": (
+                            "Content-Type, Authorization, "
+                            "Mcp-Session-Id, Mcp-Protocol-Version, Mcp-Method, Mcp-Name"
+                        ),
+                        **resp_headers,
                     },
                 )
-            else:
-                # Return regular JSON response
-                return JSONResponse(
-                    content=response, headers={"Mcp-Session-Id": session_id}
-                )
+            return JSONResponse(content=response, headers=resp_headers)
 
         except ValueError as e:
-            # Method not found
             if method == "tools/call":
                 _log_tools_call(
-                    session_id, obs_client, params, None, tool_call_start,
+                    correlation_id, obs_client, params, None, tool_call_start,
                     status="error", error=str(e),
                 )
             return JSONResponse(
                 content=create_jsonrpc_error("METHOD_NOT_FOUND", str(e), request_id),
                 status_code=404,
-                headers={"Mcp-Session-Id": session_id},
+                headers=resp_headers,
             )
         except Exception as e:
-            # Internal error
             if method == "tools/call":
                 _log_tools_call(
-                    session_id, obs_client, params, None, tool_call_start,
+                    correlation_id, obs_client, params, None, tool_call_start,
                     status="error", error=str(e),
                 )
             return JSONResponse(
                 content=create_jsonrpc_error("INTERNAL_ERROR", str(e), request_id),
                 status_code=500,
-                headers={"Mcp-Session-Id": session_id},
+                headers=resp_headers,
             )
         finally:
             workspace_ctx.reset(ctx_token)
             observability.call_context.reset(obs_token)
+            request_context.request_meta.reset(meta_token)
 
     except Exception as e:
-        # Catch-all for unexpected errors
         return JSONResponse(
             content=create_jsonrpc_error(
                 "INTERNAL_ERROR", f"Unexpected error: {str(e)}"

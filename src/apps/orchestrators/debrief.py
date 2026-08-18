@@ -1,13 +1,56 @@
 """Debrief preview + submit orchestrators."""
 from __future__ import annotations
 
+import json
+import os
 import re
+import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 from src.apps.composers import call_vault, require_scope
 
-# In-memory idempotency for process lifetime (vault also checked via note_exists).
-_IDEMPOTENCY: Dict[str, Dict[str, Any]] = {}
+_IDEM_DB = os.getenv("DEBRIEF_IDEM_DB", "debrief_idempotency.db")
+
+
+def _idem_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_IDEM_DB)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS debrief_idempotency (
+            idempotency_key TEXT PRIMARY KEY,
+            result_json TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )"""
+    )
+    conn.commit()
+    return conn
+
+
+def _idem_get(key: str) -> Optional[Dict[str, Any]]:
+    conn = _idem_conn()
+    try:
+        row = conn.execute(
+            "SELECT result_json FROM debrief_idempotency WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+    finally:
+        conn.close()
+
+
+def _idem_put(key: str, result: Dict[str, Any]) -> None:
+    conn = _idem_conn()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO debrief_idempotency
+               (idempotency_key, result_json, created_at) VALUES (?, ?, ?)""",
+            (key, json.dumps(result, default=str), time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _slug(text: str) -> str:
@@ -83,10 +126,11 @@ async def submit_debrief(
     if not idempotency_key:
         raise ValueError("idempotency_key is required")
 
-    if idempotency_key in _IDEMPOTENCY:
-        cached = dict(_IDEMPOTENCY[idempotency_key])
-        cached["idempotent_replay"] = True
-        return cached
+    cached = _idem_get(idempotency_key)
+    if cached is not None:
+        out = dict(cached)
+        out["idempotent_replay"] = True
+        return out
 
     plan = await preview_debrief(payload, scope=scope)
     written: List[Dict[str, Any]] = []
@@ -218,5 +262,5 @@ async def submit_debrief(
         "scope": scope,
     }
     if not failed:
-        _IDEMPOTENCY[idempotency_key] = result
+        _idem_put(idempotency_key, result)
     return result

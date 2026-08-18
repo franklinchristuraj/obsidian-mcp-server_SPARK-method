@@ -15,13 +15,32 @@ set -uo pipefail
 LABEL="com.frank.mcp-local"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Match the port the server actually binds: explicit env, then .env, then the
-# uvicorn default in main_production.py.
-env_port="$(grep -E '^MCP_PORT=' "$ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
-PORT="${MCP_PORT:-${env_port:-8888}}"
-URL="http://127.0.0.1:${PORT}/health"
-
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
+
+# Match the port the server actually binds, using main_production.py's
+# precedence: exported env wins, then .env.production, then .env. There is
+# deliberately no default — guessing a port here is worse than stopping, since
+# health-checking the wrong port makes every probe fail and this script would
+# restart a healthy server once a minute, forever.
+env_file_port() {
+  [ -f "$1" ] || return 1
+  local v
+  v="$(grep -E '^[[:space:]]*MCP_PORT=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- \
+       | tr -d '"'"'"'[:space:]')"
+  [ -n "$v" ] && echo "$v"
+}
+
+PORT="${MCP_PORT:-$(env_file_port "$ROOT/.env.production" || env_file_port "$ROOT/.env" || true)}"
+if [ -z "${PORT:-}" ]; then
+  echo "$(ts) FATAL: MCP_PORT is not set in the environment, $ROOT/.env.production, or $ROOT/.env."
+  echo "$(ts)   Refusing to guess a port — see .env.example (MCP_PORT=8000)."
+  exit 1
+fi
+if ! [ "$PORT" -eq "$PORT" ] 2>/dev/null; then
+  echo "$(ts) FATAL: MCP_PORT must be an integer, got '$PORT'."
+  exit 1
+fi
+URL="http://127.0.0.1:${PORT}/health"
 healthy() { curl -fsS -m 5 "$URL" >/dev/null 2>&1; }
 
 if healthy; then

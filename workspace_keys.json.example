@@ -30,7 +30,13 @@
   },
   "oauth_clients": {
     "paste-oauth-client-id-here": {
-      "name": "Claude web client",
+      "name": "Claude web client (DCR client_id)",
+      "scopes": ["personal", "passion", "work", "parallax"],
+      "write_scopes": ["personal", "passion", "work", "parallax"],
+      "role": "user"
+    },
+    "https://claude.ai/": {
+      "name": "Claude CIMD clients (URL prefix match)",
       "scopes": ["personal", "passion", "work", "parallax"],
       "write_scopes": ["personal", "passion", "work", "parallax"],
       "role": "user"

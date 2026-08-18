@@ -6,11 +6,10 @@ Logs every tools/call to a local SQLite file so tool-selection behavior
 Writes never happen on the request path: log_tool_call() only enqueues,
 a background task drains the queue and flushes to SQLite.
 
-Session correlation: the MCP wire protocol doesn't expose a native
-session id here (no StreamableHTTP session handling in this server), so
-main.py mints an Mcp-Session-Id on `initialize` and expects the client to
-echo it back per the Streamable HTTP spec. Clients that don't echo it
-fall back to a coarse time-window bucket keyed by API-key identity.
+Correlation (2026-07-28): protocol sessions are gone. Each request gets a
+correlation id — optional Mcp-Session-Id if the client still sends one,
+else a per-request UUID. Client type comes from _meta clientInfo (modern)
+or a legacy initialize registration keyed by echoed correlation id.
 """
 from __future__ import annotations
 
@@ -20,6 +19,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,19 +35,26 @@ _BATCH_MAX = 100
 _queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
 _dropped_count = 0
 
-# session_id -> classified client ("Desktop" | "Code" | "n8n" | "unknown"),
-# populated from clientInfo.name on `initialize`. Bounded and LRU-evicted:
-# every `initialize` mints a new id, so an unbounded dict grows for the life
-# of the process and lets any authenticated client exhaust memory by
-# reconnecting in a loop.
+# correlation_id -> classified client ("Desktop" | "Code" | "n8n" | "unknown"),
+# populated from clientInfo.name on legacy `initialize` only. Bounded LRU.
 _SESSION_CLIENTS_MAX = 10_000
 _session_clients: "OrderedDict[str, str]" = OrderedDict()
 
 
 @dataclass(frozen=True)
 class CallContext:
+    """Request-scoped observability context.
+
+    ``session_id`` is the correlation id stored in SQLite (column name kept
+    for compatibility). Prefer reading ``correlation_id`` via the property.
+    """
+
     session_id: str
     client: str
+
+    @property
+    def correlation_id(self) -> str:
+        return self.session_id
 
 
 call_context: ContextVar[Optional[CallContext]] = ContextVar("call_context", default=None)
@@ -67,6 +74,7 @@ def _classify_client(raw_name: Optional[str]) -> str:
 
 
 def register_session_client(session_id: str, raw_client_name: Optional[str]) -> None:
+    """Legacy: remember client type for an echoed correlation id after initialize."""
     _session_clients[session_id] = _classify_client(raw_client_name)
     _session_clients.move_to_end(session_id)
     while len(_session_clients) > _SESSION_CLIENTS_MAX:
@@ -77,23 +85,42 @@ def resolve_client(session_id: str) -> str:
     client = _session_clients.get(session_id)
     if client is None:
         return "unknown"
-    # Touch on read so a long-running conversation isn't evicted by a burst
-    # of short-lived ones.
     _session_clients.move_to_end(session_id)
     return client
 
 
+def classify_client_from_info(raw_client_name: Optional[str]) -> str:
+    """Classify a client from _meta / initialize clientInfo.name."""
+    return _classify_client(raw_client_name)
+
+
+def resolve_correlation_id(
+    *,
+    incoming_session_id: Optional[str],
+    identity: str,
+    method: str,
+    is_modern: bool,
+) -> str:
+    """Pick a correlation id for this request.
+
+    Modern (2026-07-28) path: use echoed header if present, else a fresh UUID
+    (no identity time-bucket — that only existed for legacy session affinity).
+    Legacy path: mint on initialize, else echo or fall back to time-bucket.
+    """
+    if incoming_session_id:
+        return incoming_session_id
+    if is_modern:
+        return str(uuid.uuid4())
+    if method == "initialize":
+        return str(uuid.uuid4())
+    return fallback_session_id(identity)
+
+
 def fallback_session_id(identity: str) -> str:
-    """Time-window correlation for clients that don't echo Mcp-Session-Id.
+    """Time-window correlation for legacy clients that don't echo Mcp-Session-Id.
 
-    Materially worse than a real session id (PRD §6) — over-call detection
-    degrades since concurrent/overlapping conversations from the same key
-    collapse into one bucket.
-
-    Identity is hashed, not embedded: the fallback id is returned in the
-    Mcp-Session-Id response header (and thus nginx access logs) and written
-    to observability.db. Auth identities include truncated API-key prefixes
-    and a U+2026 ellipsis that is not latin-1 encodable for HTTP headers.
+    Identity is hashed, not embedded: the id may appear in response headers
+    and observability.db. Auth identities can include non-latin-1 characters.
     """
     bucket = int(time.time() // SESSION_FALLBACK_WINDOW_SECONDS)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
@@ -101,9 +128,6 @@ def fallback_session_id(identity: str) -> str:
 
 
 def _redact(args: Any) -> Any:
-    # `arguments` is client-supplied and need not be an object. Record the
-    # shape of a malformed one rather than raising, which would drop the
-    # record for exactly the misbehaving call worth keeping.
     if not isinstance(args, dict):
         return args if not REDACT_ARGS else type(args).__name__
     if not REDACT_ARGS:
@@ -122,8 +146,7 @@ def log_tool_call(
     latency_ms: int,
     response_bytes: int,
 ) -> None:
-    """Enqueue a tool-call record. Never raises — a logging failure must
-    never break the tool call it's observing (PRD §4)."""
+    """Enqueue a tool-call record. Never raises."""
     try:
         record = {
             "session_id": session_id,
@@ -179,10 +202,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 def _write_batch(records: List[Dict[str, Any]]) -> None:
     conn = sqlite3.connect(DB_PATH)
     try:
-        # CREATE TABLE IF NOT EXISTS is cheap and idempotent — guards
-        # against the DB file disappearing after startup (rotation,
-        # accidental delete, disk restore) leaving the writer stuck
-        # failing every batch with no way to recover without a restart.
         _init_schema(conn)
         conn.executemany(
             """INSERT INTO tool_calls
@@ -204,11 +223,7 @@ async def init_observability() -> None:
 
 
 async def run_background_writer() -> None:
-    """Drains the queue and flushes to SQLite off the request path.
-
-    A write failure here (e.g. disk full) must not take down the process
-    or block new tool calls from being enqueued — log and keep going.
-    """
+    """Drains the queue and flushes to SQLite off the request path."""
     loop = asyncio.get_running_loop()
     while True:
         try:

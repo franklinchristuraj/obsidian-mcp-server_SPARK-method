@@ -12,6 +12,7 @@ class MCPMessageType(Enum):
     """MCP message types for proper protocol handling"""
 
     INITIALIZE = "initialize"
+    SERVER_DISCOVER = "server/discover"
     TOOLS_LIST = "tools/list"
     TOOLS_CALL = "tools/call"
     RESOURCES_LIST = "resources/list"
@@ -20,6 +21,8 @@ class MCPMessageType(Enum):
     PROMPTS_LIST = "prompts/list"
     PROMPTS_GET = "prompts/get"
     COMPLETION_COMPLETE = "completion/complete"
+    TASKS_GET = "tasks/get"
+    TASKS_UPDATE = "tasks/update"
     PING = "ping"
     # Notifications
     NOTIFICATIONS_INITIALIZED = "notifications/initialized"

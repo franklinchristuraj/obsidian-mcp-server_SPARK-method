@@ -163,8 +163,22 @@ async def verify_api_key(
         token_data = await token_store.get_access_token(token)
         if token_data is not None:
             client_id = token_data["client_id"]
-            if client_id in oauth_clients and isinstance(oauth_clients[client_id], dict):
-                return _entry_to_context(client_id, oauth_clients[client_id])
+            # Exact match, or prefix match for CIMD URL keys / domain allowlist
+            entry = None
+            if client_id in oauth_clients and isinstance(
+                oauth_clients[client_id], dict
+            ):
+                entry = oauth_clients[client_id]
+            else:
+                for key, val in oauth_clients.items():
+                    if not isinstance(val, dict):
+                        continue
+                    # Prefix: "https://claude.ai/" matches CIMD URLs under that host
+                    if client_id.startswith(str(key)) and str(key).startswith("https://"):
+                        entry = val
+                        break
+            if entry is not None:
+                return _entry_to_context(client_id, entry)
             return WorkspaceContext(
                 identity=client_id,
                 allowed_scopes=defaults,

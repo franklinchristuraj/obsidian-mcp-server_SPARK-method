@@ -1,6 +1,29 @@
 # Obsidian MCP Server - Production Deployment Guide
 
-## 📋 Prerequisites
+## MCP protocol note (2026-07-28 dual-compat)
+
+The server speaks both legacy `initialize` clients and the stateless
+`2026-07-28` model (`server/discover`, `Mcp-Method` / `Mcp-Name` headers,
+Tasks for heavy tools). **No sticky sessions** are required. Prefer 60s
+proxy read timeouts once Task-aware clients are common; see
+[RATE_LIMITING_GUIDE.md](RATE_LIMITING_GUIDE.md) and
+[nginx/nginx_mcp_config.conf](nginx/nginx_mcp_config.conf).
+
+### Multi-worker (`MCP_WORKERS`)
+
+Production entrypoint reads `MCP_WORKERS` (default `2`). Set `1` to roll back.
+
+Shared SQLite files must live on a volume visible to every worker process:
+
+- `tasks.db` (`TASKS_DB_PATH`) — queued/claimed background jobs
+- `tokens.db` (`TOKEN_DB_PATH`) — OAuth
+- `debrief_idempotency.db` (`DEBRIEF_IDEM_DB`) — debrief submit replay
+- `cimd_cache.db` (`CIMD_CACHE_DB`) — CIMD metadata cache
+
+Each worker runs a task poller at startup that claims `queued` rows. Cancel via
+`tasks/update` is cooperative across workers.
+
+## Prerequisites
 
 - ✅ VPS with Ubuntu 22.04+ or Debian 11+
 - ✅ Python 3.10+
