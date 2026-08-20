@@ -90,7 +90,7 @@ pip install httpx
 ```bash
 curl -X POST https://mcp.ziksaka.com/mcp \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer REDACTED-LEAKED-KEY" \
+  -H "Authorization: Bearer $MCP_API_KEY" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}'
 ```
 

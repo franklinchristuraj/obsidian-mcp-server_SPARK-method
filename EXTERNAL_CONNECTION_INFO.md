@@ -16,7 +16,7 @@ https://mcp.ziksaka.com/health
 
 Your API key is stored in `.env` file:
 ```bash
-MCP_API_KEY=REDACTED-LEAKED-KEY
+MCP_API_KEY=your-mcp-api-key
 ```
 
 **⚠️ Security Note:** Keep this API key secure. Do not share it publicly or commit it to version control.
@@ -36,7 +36,7 @@ When connecting via Claude.ai's connector interface, use these settings:
 **Connector Fields:**
 - **Remote URL**: `https://mcp.ziksaka.com/mcp`
 - **OAuth Client ID**: `franklinchris`
-- **OAuth Client Secret**: `REDACTED-LEAKED-KEY` *(your API key from `.env`)*
+- **OAuth Client Secret**: your API key from `.env`
 
 **How it works:**
 The server accepts authentication via multiple methods:

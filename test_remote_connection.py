@@ -4,6 +4,7 @@ Remote MCP Server Connection Diagnostic Tool
 Tests the remote server connection and identifies issues
 """
 import json
+import os
 import sys
 import httpx
 from typing import Dict, Any
@@ -12,7 +13,10 @@ from typing import Dict, Any
 REMOTE_URL = "https://mcp.ziksaka.com"
 MCP_ENDPOINT = f"{REMOTE_URL}/mcp"
 HEALTH_ENDPOINT = f"{REMOTE_URL}/health"
-API_KEY = "REDACTED-LEAKED-KEY"
+API_KEY = os.getenv("MCP_API_KEY", "")
+
+if not API_KEY:
+    sys.exit("Set MCP_API_KEY in your environment before running this script.")
 
 def print_section(title: str):
     """Print a formatted section header"""

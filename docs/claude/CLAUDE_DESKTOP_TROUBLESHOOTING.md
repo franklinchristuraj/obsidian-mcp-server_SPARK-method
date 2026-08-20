@@ -35,7 +35,7 @@
 In your Nginx config, temporarily remove the Authorization header to test:
 ```nginx
 # Comment out this line temporarily
-# proxy_set_header Authorization "Bearer REDACTED-LEAKED-KEY";
+# proxy_set_header Authorization "Bearer your-mcp-api-key";
 ```
 
 #### Option B: OAuth Setup (Advanced)

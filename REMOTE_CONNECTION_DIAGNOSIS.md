@@ -56,7 +56,7 @@ Since the server is functioning correctly, the "UnexpectedError" you're seeing i
 **Check:**
 - ✅ **URL:** Should be `https://mcp.ziksaka.com/mcp` (not `/health`)
 - ✅ **Authentication:** Use `Authorization: Bearer YOUR_API_KEY` header
-- ✅ **API Key:** `REDACTED-LEAKED-KEY`
+- ✅ **API Key:** your key from `.env` (`MCP_API_KEY`)
 - ✅ **Content-Type:** `application/json`
 - ✅ **Request Format:** Valid JSON-RPC 2.0 format
 
@@ -90,7 +90,7 @@ Some MCP client libraries may have issues with:
 If connecting via Claude.ai connector:
 - **Remote URL:** `https://mcp.ziksaka.com/mcp`
 - **OAuth Client ID:** `franklinchris`
-- **OAuth Client Secret:** `REDACTED-LEAKED-KEY`
+- **OAuth Client Secret:** your API key from `.env`
 
 ## Testing the Connection
 
@@ -107,7 +107,7 @@ Or test manually:
 curl https://mcp.ziksaka.com/health
 
 # MCP ping (with auth)
-curl -H "Authorization: Bearer REDACTED-LEAKED-KEY" \
+curl -H "Authorization: Bearer $MCP_API_KEY" \
      -H "Content-Type: application/json" \
      -X POST https://mcp.ziksaka.com/mcp \
      -d '{"jsonrpc":"2.0","method":"ping","id":1}'
