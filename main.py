@@ -764,9 +764,8 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
             result = await mcp_handler.handle_request(method, params)
 
             if method == "initialize" and isinstance(params, dict):
-                client_info = params.get("clientInfo") or {}
                 observability.register_session_client(
-                    correlation_id, client_info.get("name")
+                    correlation_id, req_meta.client_info.get("name")
                 )
 
             if method == "tools/call":
