@@ -102,6 +102,78 @@ class TestArgRedaction(unittest.TestCase):
         self.assertEqual(observability._queue.qsize(), 1)
 
 
+class TestProtocolCallLogging(unittest.TestCase):
+    def test_protocol_call_is_enqueued_with_kind_discriminator(self) -> None:
+        observability._queue._queue.clear()
+        observability.log_protocol_call(
+            method="tools/list", session_id="s", client="unknown",
+            status="ok", error=None, latency_ms=12, response_bytes=456,
+        )
+        self.assertEqual(observability._queue.qsize(), 1)
+        record = observability._queue._queue[0]
+        self.assertEqual(record["kind"], "protocol_call")
+        self.assertEqual(record["method"], "tools/list")
+        self.assertEqual(record["status"], "ok")
+        self.assertEqual(record["latency_ms"], 12)
+
+    def test_write_batch_routes_protocol_calls_to_their_own_table(self) -> None:
+        import tempfile
+
+        db_fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(db_fd)
+        os.unlink(db_path)
+        prev_db_path = observability.DB_PATH
+        observability.DB_PATH = db_path
+        try:
+            observability._write_batch(
+                [
+                    {
+                        "kind": "protocol_call",
+                        "method": "server/discover",
+                        "session_id": "s",
+                        "client": "unknown",
+                        "status": "ok",
+                        "error": None,
+                        "latency_ms": 5,
+                        "response_bytes": 100,
+                        "ts": "2026-08-20T00:00:00Z",
+                    },
+                    {
+                        "kind": "tool_call",
+                        "session_id": "s",
+                        "client": "unknown",
+                        "tool_name": "ping",
+                        "args": "{}",
+                        "status": "ok",
+                        "error": None,
+                        "latency_ms": 3,
+                        "response_bytes": 10,
+                        "ts": "2026-08-20T00:00:00Z",
+                    },
+                ]
+            )
+            import sqlite3
+
+            conn = sqlite3.connect(db_path)
+            try:
+                protocol_rows = conn.execute(
+                    "SELECT method, status FROM protocol_calls"
+                ).fetchall()
+                tool_rows = conn.execute(
+                    "SELECT tool_name, status FROM tool_calls"
+                ).fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(protocol_rows, [("server/discover", "ok")])
+            self.assertEqual(tool_rows, [("ping", "ok")])
+        finally:
+            observability.DB_PATH = prev_db_path
+            os.unlink(db_path)
+            for suffix in ("-wal", "-shm"):
+                if os.path.exists(db_path + suffix):
+                    os.unlink(db_path + suffix)
+
+
 class TestSessionClientCache(unittest.TestCase):
     def setUp(self) -> None:
         observability._session_clients.clear()

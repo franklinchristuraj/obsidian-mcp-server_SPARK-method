@@ -6,7 +6,7 @@ The MCP endpoint at `POST /mcp` implements Streamable HTTP with **dual-compat**:
 
 | Era | How clients connect |
 |-----|---------------------|
-| Legacy (≤ `2025-06-18`) | `initialize` handshake; optional `Mcp-Session-Id` echo |
+| Legacy (≤ `2025-11-25`) | `initialize` handshake; optional `Mcp-Session-Id` echo |
 | Modern (`2026-07-28`) | Stateless; `server/discover` optional; every request carries `_meta` + `Mcp-Method` / `Mcp-Name` headers |
 
 No sticky sessions are required. `Mcp-Session-Id` is correlation-only for observability.

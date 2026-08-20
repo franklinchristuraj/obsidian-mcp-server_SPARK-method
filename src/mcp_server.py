@@ -11,6 +11,15 @@ from .types import MCPMessageType, MCPTool, MCPResource, MCPCapabilities, MCPPro
 from .request_context import request_meta
 from .scope import workspace_ctx
 
+
+class UnsupportedProtocolVersionError(Exception):
+    """Raised when a client explicitly requests a protocol version the server doesn't implement."""
+
+    def __init__(self, requested: str, supported: List[str]):
+        self.requested = requested
+        self.supported = supported
+        super().__init__(f"Unsupported protocol version: {requested}")
+
 # prompts/get "description" must match each prompt (not a generic template blurb)
 _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     "vault_mcp_agent_guide": (
@@ -51,6 +60,7 @@ class MCPProtocolHandler:
     # entry is offered to clients that don't request a specific version.
     SUPPORTED_PROTOCOL_VERSIONS = (
         "2026-07-28",
+        "2025-11-25",
         "2025-06-18",
         "2025-03-26",
         "2024-11-05",
@@ -139,7 +149,7 @@ class MCPProtocolHandler:
 
             self.tools.extend(obsidian_tools.get_tools())
         except Exception as e:
-            print(f"Warning: Could not load Obsidian tools: {e}")
+            print(f"🚨 CRITICAL: tool registration failed (Obsidian tools): {e}")
 
         # MCP Apps tools (prep_card, lint_queue, …)
         try:
@@ -147,7 +157,7 @@ class MCPProtocolHandler:
 
             self.tools.extend(get_app_tools())
         except Exception as e:
-            print(f"Warning: Could not load MCP App tools: {e}")
+            print(f"🚨 CRITICAL: tool registration failed (MCP App tools): {e}")
 
         # Resources are discovered per API-key scope set (workspace roots + pins).
         self.resources: List[MCPResource] = []
@@ -160,7 +170,7 @@ class MCPProtocolHandler:
 
             self.prompts.extend(obsidian_prompts.get_prompts())
         except Exception as e:
-            print(f"Warning: Could not load Obsidian prompts: {e}")
+            print(f"🚨 CRITICAL: prompt registration failed (Obsidian prompts): {e}")
 
         # Frozen wire snapshots so tools/list and prompts/list avoid
         # re-serializing schemas on every call (SEP-2549 friendly).
@@ -209,6 +219,9 @@ class MCPProtocolHandler:
         except ValueError as e:
             # Re-raise ValueError to preserve it for METHOD_NOT_FOUND handling
             raise
+        except UnsupportedProtocolVersionError:
+            # Re-raise to preserve .requested/.supported for the JSON-RPC error mapping
+            raise
         except Exception as e:
             raise Exception(f"Error handling {method}: {str(e)}")
 
@@ -254,9 +267,13 @@ class MCPProtocolHandler:
         return prompt_list
 
     def _negotiate_version(self, requested: Optional[str]) -> str:
+        if requested is None:
+            return self.protocol_version
         if requested in self.SUPPORTED_PROTOCOL_VERSIONS:
-            return requested  # type: ignore[return-value]
-        return self.protocol_version
+            return requested
+        raise UnsupportedProtocolVersionError(
+            requested=requested, supported=list(self.SUPPORTED_PROTOCOL_VERSIONS)
+        )
 
     async def _handle_initialize(
         self, params: Optional[Dict[str, Any]]

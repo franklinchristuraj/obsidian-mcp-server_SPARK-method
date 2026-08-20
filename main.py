@@ -13,7 +13,11 @@ import uuid
 from typing import Dict, Any, Optional, AsyncGenerator
 from src.auth import verify_api_key, redact_sensitive_headers
 from src.scope import workspace_ctx
-from src.mcp_server import mcp_handler, MCPProtocolHandler
+from src.mcp_server import (
+    mcp_handler,
+    MCPProtocolHandler,
+    UnsupportedProtocolVersionError,
+)
 from src.token_store import TokenStore, generate_token, verify_pkce
 from src import observability
 from src import request_context
@@ -84,7 +88,13 @@ async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "obsidian-mcp-server"}
+    return {
+        "status": "healthy",
+        "service": "obsidian-mcp-server",
+        "pid": os.getpid(),
+        "tools_loaded": len(mcp_handler.tools),
+        "prompts_loaded": len(mcp_handler.prompts),
+    }
 
 
 @app.get("/.well-known/oauth-authorization-server")
@@ -424,6 +434,11 @@ JSONRPC_ERRORS = {
     "INTERNAL_ERROR": {"code": -32603, "message": "Internal error"},
     # SEP-2243: Mcp-Method / Mcp-Name disagree with JSON-RPC body
     "HEADER_MISMATCH": {"code": -32020, "message": "Header mismatch"},
+    # spec 2026-07-28 versioning: client requested a version the server doesn't implement
+    "UNSUPPORTED_PROTOCOL_VERSION": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+    },
 }
 
 
@@ -594,6 +609,41 @@ def _log_tools_call(
         pass
 
 
+# Discovery/handshake methods worth tracking with structured latency/status,
+# distinct from tools/call (already logged via _log_tools_call).
+_PROTOCOL_LOG_METHODS = frozenset(
+    {"tools/list", "resources/list", "prompts/list", "server/discover", "initialize"}
+)
+
+
+def _log_protocol_call(
+    method: str,
+    session_id: str,
+    client: str,
+    result: Any,
+    start: float,
+    status: str,
+    error: Optional[str],
+) -> None:
+    """Best-effort structured logging for discovery/handshake methods. Never raises."""
+    try:
+        try:
+            response_bytes = len(json.dumps(result, default=str).encode("utf-8"))
+        except Exception:
+            response_bytes = 0
+        observability.log_protocol_call(
+            method=method,
+            session_id=session_id,
+            client=client,
+            status=status,
+            error=error,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            response_bytes=response_bytes,
+        )
+    except Exception:
+        pass
+
+
 def _validate_mcp_headers(
     request: Request,
     method: str,
@@ -724,6 +774,11 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
                     correlation_id, obs_client, params, result, tool_call_start,
                     status="ok", error=None,
                 )
+            elif method in _PROTOCOL_LOG_METHODS:
+                _log_protocol_call(
+                    method, correlation_id, obs_client, result, tool_call_start,
+                    status="ok", error=None,
+                )
 
             if method.startswith("notifications/") and result is None:
                 return Response(status_code=202, headers=resp_headers)
@@ -754,15 +809,40 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
                     correlation_id, obs_client, params, None, tool_call_start,
                     status="error", error=str(e),
                 )
+            elif method in _PROTOCOL_LOG_METHODS:
+                _log_protocol_call(
+                    method, correlation_id, obs_client, None, tool_call_start,
+                    status="error", error=str(e),
+                )
             return JSONResponse(
                 content=create_jsonrpc_error("METHOD_NOT_FOUND", str(e), request_id),
                 status_code=404,
+                headers=resp_headers,
+            )
+        except UnsupportedProtocolVersionError as e:
+            if method in _PROTOCOL_LOG_METHODS:
+                _log_protocol_call(
+                    method, correlation_id, obs_client, None, tool_call_start,
+                    status="error", error=str(e),
+                )
+            return JSONResponse(
+                content=create_jsonrpc_error(
+                    "UNSUPPORTED_PROTOCOL_VERSION",
+                    {"supported": e.supported, "requested": e.requested},
+                    request_id,
+                ),
+                status_code=400,
                 headers=resp_headers,
             )
         except Exception as e:
             if method == "tools/call":
                 _log_tools_call(
                     correlation_id, obs_client, params, None, tool_call_start,
+                    status="error", error=str(e),
+                )
+            elif method in _PROTOCOL_LOG_METHODS:
+                _log_protocol_call(
+                    method, correlation_id, obs_client, None, tool_call_start,
                     status="error", error=str(e),
                 )
             return JSONResponse(

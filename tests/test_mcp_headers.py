@@ -83,6 +83,42 @@ class TestMcpHeaders(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
 
+    def test_legacy_initialize_2025_11_25_negotiated(self) -> None:
+        response = self.client.post(
+            "/mcp",
+            headers=self.auth,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "clientInfo": {"name": "claude-ai", "version": "0.1.0"},
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["result"]["protocolVersion"], "2025-11-25"
+        )
+
+    def test_unsupported_protocol_version_rejected(self) -> None:
+        response = self.client.post(
+            "/mcp",
+            headers=self.auth,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "1900-01-01"},
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        err = response.json()["error"]
+        self.assertEqual(err["code"], -32022)
+        self.assertEqual(err["data"]["requested"], "1900-01-01")
+        self.assertIn("2026-07-28", err["data"]["supported"])
+
 
 if __name__ == "__main__":
     unittest.main()

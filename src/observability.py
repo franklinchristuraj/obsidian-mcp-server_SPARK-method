@@ -149,10 +149,43 @@ def log_tool_call(
     """Enqueue a tool-call record. Never raises."""
     try:
         record = {
+            "kind": "tool_call",
             "session_id": session_id,
             "client": client,
             "tool_name": tool_name,
             "args": json.dumps(_redact(args), default=str),
+            "status": status,
+            "error": error,
+            "latency_ms": latency_ms,
+            "response_bytes": response_bytes,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _queue.put_nowait(record)
+    except asyncio.QueueFull:
+        global _dropped_count
+        _dropped_count += 1
+    except Exception:
+        pass
+
+
+def log_protocol_call(
+    *,
+    method: str,
+    session_id: str,
+    client: str,
+    status: str,
+    error: Optional[str],
+    latency_ms: int,
+    response_bytes: int,
+) -> None:
+    """Enqueue a non-tools/call MCP method record (tools/list, server/discover,
+    initialize, ...). Same best-effort/never-raises contract as log_tool_call."""
+    try:
+        record = {
+            "kind": "protocol_call",
+            "method": method,
+            "session_id": session_id,
+            "client": client,
             "status": status,
             "error": error,
             "latency_ms": latency_ms,
@@ -185,6 +218,19 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
         CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(ts);
+        CREATE TABLE IF NOT EXISTS protocol_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            method TEXT,
+            session_id TEXT,
+            client TEXT,
+            status TEXT,
+            error TEXT,
+            latency_ms INTEGER,
+            response_bytes INTEGER,
+            ts TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_protocol_calls_session ON protocol_calls(session_id);
+        CREATE INDEX IF NOT EXISTS idx_protocol_calls_ts ON protocol_calls(ts);
         CREATE TABLE IF NOT EXISTS session_reviews (
             session_id TEXT PRIMARY KEY,
             human_verdict TEXT,
@@ -200,15 +246,26 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def _write_batch(records: List[Dict[str, Any]]) -> None:
+    tool_call_records = [r for r in records if r.get("kind") != "protocol_call"]
+    protocol_call_records = [r for r in records if r.get("kind") == "protocol_call"]
+
     conn = sqlite3.connect(DB_PATH)
     try:
         _init_schema(conn)
-        conn.executemany(
-            """INSERT INTO tool_calls
-               (session_id, client, tool_name, args, status, error, latency_ms, response_bytes, ts)
-               VALUES (:session_id, :client, :tool_name, :args, :status, :error, :latency_ms, :response_bytes, :ts)""",
-            records,
-        )
+        if tool_call_records:
+            conn.executemany(
+                """INSERT INTO tool_calls
+                   (session_id, client, tool_name, args, status, error, latency_ms, response_bytes, ts)
+                   VALUES (:session_id, :client, :tool_name, :args, :status, :error, :latency_ms, :response_bytes, :ts)""",
+                tool_call_records,
+            )
+        if protocol_call_records:
+            conn.executemany(
+                """INSERT INTO protocol_calls
+                   (method, session_id, client, status, error, latency_ms, response_bytes, ts)
+                   VALUES (:method, :session_id, :client, :status, :error, :latency_ms, :response_bytes, :ts)""",
+                protocol_call_records,
+            )
         conn.commit()
     finally:
         conn.close()
