@@ -64,6 +64,10 @@ def _classify_client(raw_name: Optional[str]) -> str:
     if not raw_name:
         return "unknown"
     name = raw_name.lower()
+    # Check "codex" before "code": "codex" contains "code" as a substring,
+    # so order matters or Codex sessions misclassify as Claude Code.
+    if "codex" in name:
+        return "Codex"
     if "desktop" in name:
         return "Desktop"
     if "code" in name:

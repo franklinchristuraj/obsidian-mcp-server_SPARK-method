@@ -82,11 +82,13 @@ class TestTasksHttp(unittest.TestCase):
                 "params": {"taskId": "does-not-exist"},
             },
         )
-        # METHOD_NOT_FOUND path for ValueError from handler
-        self.assertIn(response.status_code, (404, 500, 200))
+        # Unknown taskId is a request-level error: HTTP 200 + -32002, never a
+        # 404 (which clients read as a dead session). See test_request_errors.
+        self.assertIn(response.status_code, (401, 200))
         body = response.json()
-        if "error" in body:
-            self.assertIn("Unknown taskId", str(body["error"]))
+        if "error" in body and "Unknown taskId" in str(body["error"]):
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(body["error"]["code"], -32002)
 
     def test_async_tool_returns_handle_when_client_supports_tasks(self) -> None:
         meta = RequestMeta(

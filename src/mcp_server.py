@@ -9,7 +9,7 @@ import time
 from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from .types import MCPMessageType, MCPTool, MCPResource, MCPCapabilities, MCPPrompt
 from .request_context import request_meta
-from .scope import workspace_ctx
+from .scope import SCOPE_NAMES, workspace_ctx
 
 
 class UnsupportedProtocolVersionError(Exception):
@@ -20,6 +20,40 @@ class UnsupportedProtocolVersionError(Exception):
         self.supported = supported
         super().__init__(f"Unsupported protocol version: {requested}")
 
+
+# Request-level failures ride on HTTP 200 with a JSON-RPC error body. In
+# Streamable HTTP a non-2xx on the MCP endpoint - 404 especially - means "this
+# session is gone", so clients tear the transport down ("Connection closed")
+# instead of surfacing the error. Only a genuinely unknown *method* may take
+# the 404 / -32601 path; everything else raises MCPRequestError.
+INVALID_PARAMS = -32602
+INTERNAL_ERROR = -32603
+RESOURCE_NOT_FOUND = -32002
+
+
+class MCPRequestError(Exception):
+    """A request-level failure to report as a JSON-RPC error on HTTP 200."""
+
+    def __init__(self, code: int, message: str, data: Optional[Any] = None):
+        self.code = code
+        self.message = message
+        self.data = data
+        super().__init__(message)
+
+
+class InvalidParamsError(MCPRequestError):
+    """Missing or malformed params (-32602)."""
+
+    def __init__(self, message: str, data: Optional[Any] = None):
+        super().__init__(INVALID_PARAMS, message, data)
+
+
+class ResourceNotFoundError(MCPRequestError):
+    """Resource absent, or not readable by this key (-32002)."""
+
+    def __init__(self, message: str, data: Optional[Any] = None):
+        super().__init__(RESOURCE_NOT_FOUND, message, data)
+
 # prompts/get "description" must match each prompt (not a generic template blurb)
 _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     "vault_mcp_agent_guide": (
@@ -28,7 +62,7 @@ _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     ),
     "note_template_system": (
         "SPARK-style folders and YAML templates; paths are under a workspace "
-        "(personal/passion/work/parallax) when using MCP tools—pair with vault_mcp_agent_guide."
+        f"({SCOPE_NAMES}) when using MCP tools—pair with vault_mcp_agent_guide."
     ),
     "daily_note_template": (
         "Daily note YAML and sections; MCP path is e.g. 06_daily-notes/YYYY-MM-DD.md "
@@ -39,7 +73,7 @@ _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
     ),
     "area_note_template": (
         "Area note YAML under 03_areas/; choose MCP scope "
-        "(personal/passion/work/parallax) from context."
+        f"({SCOPE_NAMES}) from context."
     ),
     "format_preservation_rules": (
         "YAML and structure preservation when editing via MCP; paths remain workspace-relative."
@@ -88,7 +122,7 @@ class MCPProtocolHandler:
             "version": "2.1.0",
             "description": (
                 "Obsidian MCP server (v2.1.0): workspace-scoped CRUD "
-                "(personal / passion / work / parallax), vault intelligence, capture inbox, "
+                f"({SCOPE_NAMES.replace('/', ' / ')}), vault intelligence, capture inbox, "
                 "create_event/create_engagement (work-only), impact snapshots, "
                 "and MCP Apps (prep_card, lint_queue, snapshot_grid, debrief_form, triage_board, "
                 "promote_capture). Load MCP prompt vault_mcp_agent_guide first."
@@ -97,7 +131,7 @@ class MCPProtocolHandler:
         self.instructions = (
             "Obsidian vault MCP server. Before doing vault work, fetch the "
             "'vault_mcp_agent_guide' prompt (prompts/get) - it covers workspaces "
-            "(personal/passion/work/parallax), write_scopes, the entity graph tools "
+            f"({SCOPE_NAMES}), write_scopes, the entity graph tools "
             "(resolve_entity, get_dossier, build_context, graph/timeline tools), and "
             "path/scope conventions. Call 'workspaces' first to see which scopes this "
             "API key can read and write."
@@ -216,6 +250,9 @@ class MCPProtocolHandler:
             else:
                 raise ValueError(f"Method not found: {method}")
 
+        except MCPRequestError:
+            # Re-raise so main.py can serialize .code/.message on HTTP 200
+            raise
         except ValueError as e:
             # Re-raise ValueError to preserve it for METHOD_NOT_FOUND handling
             raise
@@ -334,9 +371,9 @@ class MCPProtocolHandler:
             try:
                 start = int(cursor)
             except (TypeError, ValueError):
-                raise ValueError(f"Invalid cursor: {cursor!r}")
+                raise InvalidParamsError(f"Invalid cursor: {cursor!r}")
             if start < 0 or start > len(items):
-                raise ValueError(f"Invalid cursor: {cursor!r}")
+                raise InvalidParamsError(f"Invalid cursor: {cursor!r}")
         end = start + page_size
         page = items[start:end]
         next_cursor = str(end) if end < len(items) else None
@@ -407,13 +444,13 @@ class MCPProtocolHandler:
     ) -> Dict[str, Any]:
         """Execute a tool call"""
         if not params:
-            raise ValueError("Missing parameters for tool call")
+            raise InvalidParamsError("Missing parameters for tool call")
 
         tool_name = params.get("name")
         arguments = params.get("arguments", {}) or {}
 
         if not tool_name:
-            raise ValueError("Missing tool name")
+            raise InvalidParamsError("Missing tool name")
 
         # MRTR gate for destructive writes (before Tasks / execution)
         from .mrtr import gate_destructive_call
@@ -541,16 +578,16 @@ class MCPProtocolHandler:
     ) -> Dict[str, Any]:
         """Read a specific resource"""
         if not params:
-            raise ValueError("Missing parameters for resource read")
+            raise InvalidParamsError("Missing parameters for resource read")
 
         uri = params.get("uri")
         if not uri:
-            raise ValueError("Missing resource URI")
+            raise InvalidParamsError("Missing resource URI")
+
+        from .clients.obsidian_client import ObsidianAPIError
+        from .resources.obsidian_resources import get_obsidian_resources
 
         try:
-            # Use ObsidianResources to read the content
-            from .resources.obsidian_resources import get_obsidian_resources
-
             resources_handler = get_obsidian_resources()
             content = await resources_handler.read_resource(uri)
 
@@ -581,10 +618,21 @@ class MCPProtocolHandler:
             return result
 
         except PermissionError as e:
-            raise ValueError(str(e))
+            # Out-of-scope path: same code as a miss, but keep the real reason.
+            raise ResourceNotFoundError(str(e))
+        except ObsidianAPIError as e:
+            if e.status_code == 404:
+                raise ResourceNotFoundError(f"Resource not found: {uri}", str(e))
+            raise MCPRequestError(
+                INTERNAL_ERROR, f"Failed to read resource {uri}: {e}"
+            )
+        except ValueError as e:
+            # parse_uri rejects an unknown scheme/authority - a caller error
+            raise InvalidParamsError(f"Invalid resource URI {uri}: {e}")
         except Exception as e:
-            # If ObsidianResources fails, provide a helpful error
-            raise ValueError(f"Failed to read resource {uri}: {str(e)}")
+            raise MCPRequestError(
+                INTERNAL_ERROR, f"Failed to read resource {uri}: {e}"
+            )
 
     async def _handle_resources_templates_list(
         self, params: Optional[Dict[str, Any]]
@@ -716,13 +764,13 @@ class MCPProtocolHandler:
         from .tasks import task_store
 
         if not params or not params.get("taskId"):
-            raise ValueError("Missing taskId")
+            raise InvalidParamsError("Missing taskId")
         ctx = workspace_ctx.get()
         if ctx is None:
-            raise ValueError("Not authenticated")
+            raise MCPRequestError(INTERNAL_ERROR, "Not authenticated")
         task = await task_store.get_task(str(params["taskId"]), ctx.identity)
         if task is None:
-            raise ValueError(f"Unknown taskId: {params['taskId']}")
+            raise ResourceNotFoundError(f"Unknown taskId: {params['taskId']}")
         return task
 
     async def _handle_tasks_update(
@@ -732,24 +780,26 @@ class MCPProtocolHandler:
         from .tasks import STATUS_CANCELLED, task_store
 
         if not params or not params.get("taskId"):
-            raise ValueError("Missing taskId")
+            raise InvalidParamsError("Missing taskId")
         ctx = workspace_ctx.get()
         if ctx is None:
-            raise ValueError("Not authenticated")
+            raise MCPRequestError(INTERNAL_ERROR, "Not authenticated")
         action = (params.get("status") or params.get("action") or "").lower()
         if action in ("cancelled", "canceled", "cancel"):
             ok = await task_store.cancel_task(str(params["taskId"]), ctx.identity)
             if not ok:
                 task = await task_store.get_task(str(params["taskId"]), ctx.identity)
                 if task is None:
-                    raise ValueError(f"Unknown taskId: {params['taskId']}")
+                    raise ResourceNotFoundError(
+                        f"Unknown taskId: {params['taskId']}"
+                    )
                 return task
             task = await task_store.get_task(str(params["taskId"]), ctx.identity)
             return task or {"taskId": params["taskId"], "status": STATUS_CANCELLED}
         # No-op update: return current state
         task = await task_store.get_task(str(params["taskId"]), ctx.identity)
         if task is None:
-            raise ValueError(f"Unknown taskId: {params['taskId']}")
+            raise ResourceNotFoundError(f"Unknown taskId: {params['taskId']}")
         return task
 
     async def _handle_prompts_get(
@@ -757,11 +807,11 @@ class MCPProtocolHandler:
     ) -> Dict[str, Any]:
         """Get a specific prompt's content"""
         if not params:
-            raise ValueError("Missing parameters for prompt get")
+            raise InvalidParamsError("Missing parameters for prompt get")
 
         name = params.get("name")
         if not name:
-            raise ValueError("Missing prompt name")
+            raise InvalidParamsError("Missing prompt name")
 
         arguments = params.get("arguments", {})
 
@@ -786,8 +836,13 @@ class MCPProtocolHandler:
                     }
                 ],
             }
+        except ValueError as e:
+            # get_prompt_content raises ValueError for an unknown prompt name
+            raise InvalidParamsError(f"Failed to get prompt {name}: {e}")
         except Exception as e:
-            raise ValueError(f"Failed to get prompt {name}: {str(e)}")
+            raise MCPRequestError(
+                INTERNAL_ERROR, f"Failed to get prompt {name}: {e}"
+            )
 
     # Static argument-name -> candidate list for prompts whose completion
     # set doesn't depend on live vault state.

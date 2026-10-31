@@ -1021,7 +1021,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                 "type": "string",
                 "description": (
                     "Path relative to the workspace (e.g. '06_daily-notes/2026-04-11.md'). "
-                    "Do not prefix with personal/passion/work — use scope instead."
+                    "Do not prefix with a workspace name (personal/passion/work/parallax/spectrum) — use scope instead."
                 ),
             },
             "content": {
@@ -1086,7 +1086,7 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
         read_path_prop = {
             "path": {
                 "type": "string",
-                "description": "Note path relative to workspace (no personal/passion/work prefix)",
+                "description": "Note path relative to workspace (no personal/passion/work/parallax/spectrum prefix)",
             },
             "scope": sr,
         }
@@ -1364,9 +1364,9 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
                     "folder": {
                         "type": "string",
                         "description": (
-                            "Folder to scan. Defaults to 'entities' for "
-                            "personal/passion/work; scans the whole workspace "
-                            "for parallax, which has no entities/ tree."
+                            "Folder to scan. Defaults to entities/ when that tree "
+                            "holds cards; otherwise scans the whole workspace "
+                            "(spectrum, parallax, and other scopes)."
                         ),
                     },
                     "fix": {

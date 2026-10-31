@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 
-KNOWN_SCOPES: Tuple[str, ...] = ("personal", "passion", "work", "parallax")
+KNOWN_SCOPES: Tuple[str, ...] = (
+    "personal",
+    "passion",
+    "work",
+    "parallax",
+    "spectrum",
+)
+# Slash-joined names for prompts and tool descriptions.
+SCOPE_NAMES = "/".join(KNOWN_SCOPES)
 
 
 @dataclass(frozen=True)
@@ -37,7 +45,9 @@ workspace_ctx: ContextVar[Optional[WorkspaceContext]] = ContextVar(
 
 def parse_default_workspace_scopes() -> Tuple[str, ...]:
     """Scopes when a key/client has no explicit entry in workspace_keys.json."""
-    raw = os.getenv("MCP_DEFAULT_WORKSPACE_SCOPES", "personal,passion,work,parallax")
+    raw = os.getenv(
+        "MCP_DEFAULT_WORKSPACE_SCOPES", ",".join(KNOWN_SCOPES)
+    )
     parts = [p.strip() for p in raw.split(",") if p.strip()]
     validated = [p for p in parts if p in KNOWN_SCOPES]
     if not validated:

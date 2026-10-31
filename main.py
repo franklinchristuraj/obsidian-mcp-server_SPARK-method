@@ -16,6 +16,7 @@ from src.scope import workspace_ctx
 from src.mcp_server import (
     mcp_handler,
     MCPProtocolHandler,
+    MCPRequestError,
     UnsupportedProtocolVersionError,
 )
 from src.token_store import TokenStore, generate_token, verify_pkce
@@ -467,6 +468,20 @@ def create_jsonrpc_error(
     return create_jsonrpc_response(error=error, request_id=request_id)
 
 
+def create_jsonrpc_error_code(
+    code: int,
+    message: str,
+    data: Optional[Any] = None,
+    request_id: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """JSON-RPC error for a failure that already knows its own code."""
+    error: Dict[str, Any] = {"code": code, "message": message}
+    if data:
+        error["data"] = data
+
+    return create_jsonrpc_response(error=error, request_id=request_id)
+
+
 def validate_jsonrpc_request(request_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Validate JSON-RPC 2.0 request format"""
     # Check required fields
@@ -802,7 +817,28 @@ async def mcp_endpoint(request: Request, auth=Depends(verify_api_key)):
                 )
             return JSONResponse(content=response, headers=resp_headers)
 
+        except MCPRequestError as e:
+            # Request-level failure (missing note, bad cursor, unknown taskId).
+            # Must be HTTP 200: a non-2xx here reads as a dead session and the
+            # client closes the transport instead of showing the error.
+            if method == "tools/call":
+                _log_tools_call(
+                    correlation_id, obs_client, params, None, tool_call_start,
+                    status="error", error=str(e),
+                )
+            elif method in _PROTOCOL_LOG_METHODS:
+                _log_protocol_call(
+                    method, correlation_id, obs_client, None, tool_call_start,
+                    status="error", error=str(e),
+                )
+            return JSONResponse(
+                content=create_jsonrpc_error_code(
+                    e.code, e.message, e.data, request_id
+                ),
+                headers=resp_headers,
+            )
         except ValueError as e:
+            # Reserved for an unknown method - see MCPRequestError above.
             if method == "tools/call":
                 _log_tools_call(
                     correlation_id, obs_client, params, None, tool_call_start,

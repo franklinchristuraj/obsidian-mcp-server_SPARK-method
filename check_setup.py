@@ -8,6 +8,8 @@ import sys
 import subprocess
 from pathlib import Path
 
+from src.scope import KNOWN_SCOPES
+
 def check_python_version():
     """Check Python version"""
     version = sys.version_info
@@ -85,13 +87,13 @@ def check_vault_path():
 
     print(f"✅ Vault path exists: {vault_path}")
     missing_scopes = [
-        s for s in ("personal", "passion", "work", "parallax")
+        s for s in KNOWN_SCOPES
         if not os.path.isdir(os.path.join(vault_path, s))
     ]
     if missing_scopes:
         print(f"⚠️  Missing scope folders: {missing_scopes}")
     else:
-        print("✅ personal/, passion/, work/, parallax/ scope folders present")
+        print(f"✅ {', '.join(s + '/' for s in KNOWN_SCOPES)} scope folders present")
     return True
 
 def main():

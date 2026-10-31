@@ -43,6 +43,14 @@ class TemplateDetector:
             "entities/event": "00_system/templates/event_template.md",
             "11_conversations": "00_system/templates/conversation.md",
             "10_discovery": "00_system/templates/hypothesis.md",
+            # Spectrum content engine. Channel piece folders are more specific
+            # than a shared 04_pieces prefix, so each maps to its own template.
+            "01_insights": "00_system/templates/insight.md",
+            "02_frameworks": "00_system/templates/framework.md",
+            "04_pieces/loop-interrupted": "00_system/templates/episode.md",
+            "04_pieces/youtube": "00_system/templates/video.md",
+            "04_pieces/instagram": "00_system/templates/social-post.md",
+            "04_pieces/linkedin": "00_system/templates/linkedin-post.md",
         }
 
         # Engagement subtype templates (selected by engagement_type, not folder).

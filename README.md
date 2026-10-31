@@ -1,6 +1,6 @@
 # Obsidian MCP Server
 
-A Model Context Protocol (MCP) server providing AI assistants with full access to Obsidian vault operations across multiple workspace scopes (personal, work, passion).
+A Model Context Protocol (MCP) server providing AI assistants with full access to Obsidian vault operations across workspace scopes (personal, passion, work, parallax, spectrum).
 
 ## Status: Production
 

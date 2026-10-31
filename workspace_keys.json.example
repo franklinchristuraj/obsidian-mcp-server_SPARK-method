@@ -2,13 +2,13 @@
   "keys": {
     "sk_admin_REPLACE_ME": {
       "name": "Admin / Interactive",
-      "scopes": ["personal", "passion", "work", "parallax"],
-      "write_scopes": ["personal", "passion", "work", "parallax"],
+      "scopes": ["personal", "passion", "work", "parallax", "spectrum"],
+      "write_scopes": ["personal", "passion", "work", "parallax", "spectrum"],
       "role": "admin"
     },
     "sk_parallax_agent_REPLACE_ME": {
       "name": "Parallax agent",
-      "scopes": ["personal", "passion", "work", "parallax"],
+      "scopes": ["personal", "passion", "work", "parallax", "spectrum"],
       "write_scopes": ["parallax"],
       "role": "agent"
     },
@@ -31,14 +31,14 @@
   "oauth_clients": {
     "paste-oauth-client-id-here": {
       "name": "Claude web client (DCR client_id)",
-      "scopes": ["personal", "passion", "work", "parallax"],
-      "write_scopes": ["personal", "passion", "work", "parallax"],
+      "scopes": ["personal", "passion", "work", "parallax", "spectrum"],
+      "write_scopes": ["personal", "passion", "work", "parallax", "spectrum"],
       "role": "user"
     },
     "https://claude.ai/": {
       "name": "Claude CIMD clients (URL prefix match)",
-      "scopes": ["personal", "passion", "work", "parallax"],
-      "write_scopes": ["personal", "passion", "work", "parallax"],
+      "scopes": ["personal", "passion", "work", "parallax", "spectrum"],
+      "write_scopes": ["personal", "passion", "work", "parallax", "spectrum"],
       "role": "user"
     }
   }

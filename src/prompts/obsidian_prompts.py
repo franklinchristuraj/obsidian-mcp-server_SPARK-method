@@ -27,7 +27,7 @@ class ObsidianPrompts:
                 name="note_template_system",
                 description=(
                     "SPARK-style folders and YAML templates; paths are under a workspace "
-                    "(personal/passion/work/parallax) when using MCP tools—pair with vault_mcp_agent_guide."
+                    "(personal/passion/work/parallax/spectrum) when using MCP tools—pair with vault_mcp_agent_guide."
                 ),
                 arguments=[
                     {
@@ -73,7 +73,7 @@ class ObsidianPrompts:
             MCPPrompt(
                 name="area_note_template",
                 description=(
-                    "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work/parallax) from context."
+                    "Area note YAML under 03_areas/; choose MCP scope (personal/passion/work/parallax/spectrum) from context."
                 ),
                 arguments=[
                     {
@@ -139,22 +139,23 @@ class ObsidianPrompts:
         """Single source of truth for agents using workspace-scoped MCP tools."""
         return """# Vault workspaces and MCP tools (agent guide)
 
-## 1. Four workspaces
+## 1. Five workspaces
 
 The vault is split into top-level folders (scopes):
 
 | Scope | Typical use | Camera-safe? |
 |-------|-------------|--------------|
 | `personal` | Journal, family, finances, health, trips, people | Never |
-| `passion` | Research, side projects, content, learning, blueprints | Show vault |
+| `passion` | Research, side projects, learning, blueprints. Raw material stays here. | Show vault |
 | `work` | Employer projects, meetings, stakeholders, OKRs, **entity graph** | Work only |
 | `parallax` | Frontier product build: charter, decisions, discovery, conversations, opaque `entities/org/` | Safe by construction, no third-party material ever enters |
+| `spectrum` | Content engine. Insights, frameworks, and one note per piece (Loop Interrupted, YouTube, Instagram, LinkedIn). Link raw notes; do not copy them. | Published pieces are showable; `li-*` show docs stay internal |
 
-Each scope has its own `00_system/templates/` and layout. Same relative path in two scopes is **two different notes**. Parallax deliberately omits `02_projects/`, `03_areas/`, `04_resources/`, `05_knowledge/`, `raw/`, and `entities/person/`.
+Each scope has its own `00_system/templates/` and layout. Same relative path in two scopes is **two different notes**. Parallax deliberately omits `02_projects/`, `03_areas/`, `04_resources/`, `05_knowledge/`, `raw/`, and `entities/person/`. Spectrum is a production pipeline, not SPARK: `01_insights/`, `02_frameworks/`, `03_channels/`, `04_pieces/<channel>/`, `05_strategy/`. Client examples pulled from `work/` are anonymised (industry and situation, never company names).
 
 ## 2. Start with `workspaces`
 
-Call the **`workspaces`** tool once per session (or when unsure). It returns **`scopes`** (reads) and **`write_scopes`** (writes) for this API key. Do not assume access to all four. Parallax agent keys often read all four but write only `parallax`.
+Call the **`workspaces`** tool once per session (or when unsure). It returns **`scopes`** (reads) and **`write_scopes`** (writes) for this API key. Do not assume access to all five. Some agent keys read every scope but write only one (parallax agents write only `parallax`).
 
 **Recommended session start:** `workspaces` → load this guide (or vault `AGENTS.md`) → `ping` for health. For entity questions, go straight to vault intelligence tools — not search+read loops.
 
@@ -162,10 +163,10 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns **`
 
 - **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`, `entities/org/o-014.md`.
 - **Work meeting notes** use **`scope=work`** and paths under **`11_work-meeting-notes/`** (aligned with meeting templates in `template_utils`).
-- **Never** put `personal/`, `passion/`, `work/`, or `parallax/` as the first segment of `path`. Use the **`scope`** parameter instead.
+- **Never** put `personal/`, `passion/`, `work/`, `parallax/`, or `spectrum/` as the first segment of `path`. Use the **`scope`** parameter instead.
 - **Reads** (search, list, vault intelligence, read): optional `scope`. Omit to include all **read** scopes for this key; set it to narrow to one workspace.
 - **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`, `promote_capture`): gated by **`write_scopes`**. If the key has more than one write scope, **`scope` is required**. Single-write-scope keys auto-select.
-- **Work-only tools** (`create_event`, `create_engagement`, `capture_snapshot`, `engagement_delta`, `impact_rollup`, `prep_card`, snapshot/debrief apps) **reject** `parallax` loudly — they never silently write into `work/`.
+- **Work-only tools** (`create_event`, `create_engagement`, `capture_snapshot`, `engagement_delta`, `impact_rollup`, `prep_card`, snapshot/debrief apps) **reject** every non-work scope, including `parallax` and `spectrum` — they never silently write into `work/`.
 
 ## 4. Work vault entity graph (read the structure, do not infer it)
 
@@ -300,7 +301,7 @@ Use only registered tool names (legacy `obs_*` names are not available).
 
 ## 6. MCP resources vs tools
 
-- **`resources/list`** returns a **tiny curated set**: vault root, allowed workspace roots (`personal/` / `passion/` / `work/` / `parallax/`), and root pins if present (`AGENTS.md`, `index.md`, `CLAUDE.md`). It does **not** enumerate daily notes, entities, meetings, or deep folders.
+- **`resources/list`** returns a **tiny curated set**: vault root, allowed workspace roots (`personal/` / `passion/` / `work/` / `parallax/` / `spectrum/`), and root pins if present (`AGENTS.md`, `index.md`, `CLAUDE.md`). It does **not** enumerate daily notes, entities, meetings, or deep folders.
 - **`resources/read`** still works for deep note/folder URIs (`obsidian://notes/personal/06_daily-notes/2026-04-11.md`). Prefer templates:
   - `obsidian://notes/{+path}`
   - `obsidian://notes/{scope}/06_daily-notes/{date}.md`
@@ -334,7 +335,7 @@ For a whole work meeting (brief before, log after), load **`meeting_prep_workflo
 
 ## MCP tools and workspace paths
 
-When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. The same folder names below exist **inside each** of `personal/`, `passion/`, `work/`, and (reduced) `parallax/` on disk.
+When using **MCP tools**, note paths are **workspace-relative**: you pass `scope` (e.g. `personal`) and `path` like `06_daily-notes/2026-04-11.md`. The SPARK folder names below exist **inside** `personal/`, `passion/`, and `work/`, and in reduced form inside `parallax/`. `spectrum/` uses its own layout: `01_insights/`, `02_frameworks/`, `03_channels/`, `04_pieces/<channel>/`. Templates there are `insight`, `framework`, `episode` (Loop Interrupted), `video`, `social-post`, and `linkedin-post`.
 
 For **tool choice, scope rules, and resources vs tools**, load the **`vault_mcp_agent_guide`** prompt first.
 

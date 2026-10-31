@@ -7,7 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src import auth as auth_mod
 from src.scope import (
@@ -90,7 +90,8 @@ def _parallax_fixture(root: Path) -> None:
 class TestParallaxKnownScopes(unittest.TestCase):
     def test_known_scopes_include_parallax(self) -> None:
         self.assertEqual(
-            KNOWN_SCOPES, ("personal", "passion", "work", "parallax")
+            KNOWN_SCOPES,
+            ("personal", "passion", "work", "parallax", "spectrum"),
         )
 
     def test_default_env_includes_parallax(self) -> None:
@@ -141,28 +142,31 @@ class TestWriteScopesAuth(unittest.TestCase):
         ) as tmp:
             json.dump(cfg, tmp)
             path = tmp.name
+        # patch.dict restores prior values (and removes keys that were unset);
+        # popping instead would wipe the MCP_API_KEY later suites authenticate with.
+        env = {
+            "WORKSPACE_KEYS_PATH": path,
+            "MCP_API_KEY": "px-key",
+            "MCP_REQUIRE_AUTH": "true",
+        }
         try:
-            os.environ["WORKSPACE_KEYS_PATH"] = path
-            os.environ["MCP_API_KEY"] = "px-key"
-            os.environ["MCP_REQUIRE_AUTH"] = "true"
+            with patch.dict(os.environ, env):
+                auth_mod.clear_workspace_config_cache()
 
-            async def run() -> WorkspaceContext:
-                req = MagicMock()
-                req.query_params.get.return_value = None
-                req.headers.get.return_value = None
-                req.headers = {"authorization": "Bearer px-key"}
-                return await auth_mod.verify_api_key(
-                    req, authorization="Bearer px-key"
-                )
+                async def run() -> WorkspaceContext:
+                    req = MagicMock()
+                    req.query_params.get.return_value = None
+                    req.headers.get.return_value = None
+                    req.headers = {"authorization": "Bearer px-key"}
+                    return await auth_mod.verify_api_key(
+                        req, authorization="Bearer px-key"
+                    )
 
-            ctx = asyncio.run(run())
-            self.assertIn("parallax", ctx.allowed_scopes)
-            self.assertEqual(ctx.effective_write_scopes, ("parallax",))
+                ctx = asyncio.run(run())
+                self.assertIn("parallax", ctx.allowed_scopes)
+                self.assertEqual(ctx.effective_write_scopes, ("parallax",))
         finally:
             os.unlink(path)
-            os.environ.pop("WORKSPACE_KEYS_PATH", None)
-            os.environ.pop("MCP_API_KEY", None)
-            os.environ.pop("MCP_REQUIRE_AUTH", None)
 
 
 class TestParallaxTools(unittest.IsolatedAsyncioTestCase):

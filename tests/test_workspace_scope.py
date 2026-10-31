@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.scope import (
     WorkspaceContext,
@@ -88,6 +88,16 @@ class TestScopeHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             forbid_scope_prefix_in_agent_path("parallax/charter.md")
 
+    def test_spectrum_is_known_scope(self) -> None:
+        self.assertEqual(
+            resolve_scoped_path(
+                "04_pieces/instagram/reel.md", "spectrum", ("work", "spectrum")
+            ),
+            "spectrum/04_pieces/instagram/reel.md",
+        )
+        with self.assertRaises(ValueError):
+            forbid_scope_prefix_in_agent_path("spectrum/01_insights/claim.md")
+
 
 class TestWorkspaceKeysAuth(unittest.TestCase):
     def setUp(self) -> None:
@@ -111,28 +121,31 @@ class TestWorkspaceKeysAuth(unittest.TestCase):
         ) as tmp:
             json.dump(cfg, tmp)
             path = tmp.name
+        # patch.dict restores prior values (and removes keys that were unset);
+        # popping instead would wipe the MCP_API_KEY later suites authenticate with.
+        env = {
+            "WORKSPACE_KEYS_PATH": path,
+            "MCP_API_KEY": "secret-one",
+            "MCP_REQUIRE_AUTH": "true",
+        }
         try:
-            os.environ["WORKSPACE_KEYS_PATH"] = path
-            os.environ["MCP_API_KEY"] = "secret-one"
-            os.environ["MCP_REQUIRE_AUTH"] = "true"
+            with patch.dict(os.environ, env):
+                auth_mod.clear_workspace_config_cache()
 
-            async def run() -> WorkspaceContext:
-                req = MagicMock()
-                req.query_params.get.return_value = None
-                req.headers.get.return_value = None
-                req.headers = {"authorization": "Bearer secret-one"}
-                return await auth_mod.verify_api_key(
-                    req, authorization="Bearer secret-one"
-                )
+                async def run() -> WorkspaceContext:
+                    req = MagicMock()
+                    req.query_params.get.return_value = None
+                    req.headers.get.return_value = None
+                    req.headers = {"authorization": "Bearer secret-one"}
+                    return await auth_mod.verify_api_key(
+                        req, authorization="Bearer secret-one"
+                    )
 
-            ctx = asyncio.run(run())
-            self.assertEqual(ctx.allowed_scopes, ("work",))
-            self.assertEqual(ctx.role, "user")
+                ctx = asyncio.run(run())
+                self.assertEqual(ctx.allowed_scopes, ("work",))
+                self.assertEqual(ctx.role, "user")
         finally:
             os.unlink(path)
-            os.environ.pop("WORKSPACE_KEYS_PATH", None)
-            os.environ.pop("MCP_API_KEY", None)
-            os.environ.pop("MCP_REQUIRE_AUTH", None)
 
 
 class TestTemplateScopePrefix(unittest.TestCase):

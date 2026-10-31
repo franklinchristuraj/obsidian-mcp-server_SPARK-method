@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..clients.obsidian_client import ObsidianAPIError, ObsidianClient
-from ..scope import KNOWN_SCOPES, get_effective_workspace_context
+from ..scope import KNOWN_SCOPES, SCOPE_NAMES, get_effective_workspace_context
 from ..types import MCPResource, MCPResourceTemplate
 
 
@@ -178,14 +178,14 @@ class ObsidianResources:
                 name="Vault note or folder",
                 description=(
                     "Any vault-relative note or folder, e.g. work/entities/customer/gojob.md. "
-                    "Prefixed with workspace (personal/passion/work/parallax). Scope-filtered on read."
+                    f"Prefixed with workspace ({SCOPE_NAMES}). Scope-filtered on read."
                 ),
             ),
             MCPResourceTemplate(
                 uriTemplate=f"{base}/{{scope}}/06_daily-notes/{{date}}.md",
                 name="Daily note",
                 description=(
-                    "Daily journal note. scope=personal|passion|work|parallax; date=YYYY-MM-DD. "
+                    f"Daily journal note. scope={SCOPE_NAMES.replace('/', '|')}; date=YYYY-MM-DD. "
                     "Prefer list_journal / read_note tools when scripting."
                 ),
             ),
