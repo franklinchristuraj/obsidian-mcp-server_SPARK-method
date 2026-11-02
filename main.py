@@ -107,6 +107,8 @@ async def oauth_server_metadata():
         "authorization_endpoint": f"{base_url}/authorize",
         "token_endpoint": f"{base_url}/token",
         "registration_endpoint": f"{base_url}/register",
+        "revocation_endpoint": f"{base_url}/revoke",
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         # S256 only — plain is advertised nowhere (not implemented)
@@ -230,28 +232,38 @@ async def oauth_authorize(
         )
 
     if resolved is None:
-        # Unregistered opaque client_id — reject when redirect_uri present
-        # (CIMD URLs that failed would have raised). Allow only with no redirect
-        # for rare debug flows; production Claude always sends redirect_uri.
-        if redirect_uri:
-            return JSONResponse(
-                content={
-                    "error": "invalid_client",
-                    "error_description": (
-                        "Unknown client_id. Use a CIMD HTTPS URL or register via DCR."
-                    ),
-                },
-                status_code=400,
-            )
-    elif redirect_uri:
-        if redirect_uri not in resolved["redirect_uris"]:
+        # Unregistered opaque client_id (CIMD URLs that failed would have raised).
+        # Never issue a code to a client nobody registered.
+        return JSONResponse(
+            content={
+                "error": "invalid_client",
+                "error_description": (
+                    "Unknown client_id. Use a CIMD HTTPS URL or register via DCR."
+                ),
+            },
+            status_code=400,
+        )
+
+    registered_uris = resolved.get("redirect_uris") or []
+    if not redirect_uri:
+        # RFC 6749 §3.1.2.3: optional only when exactly one URI is registered.
+        if len(registered_uris) != 1:
             return JSONResponse(
                 content={
                     "error": "invalid_request",
-                    "error_description": "redirect_uri does not match client metadata",
+                    "error_description": "redirect_uri is required for this client",
                 },
                 status_code=400,
             )
+        redirect_uri = registered_uris[0]
+    elif redirect_uri not in registered_uris:
+        return JSONResponse(
+            content={
+                "error": "invalid_request",
+                "error_description": "redirect_uri does not match client metadata",
+            },
+            status_code=400,
+        )
 
     print(
         f"🔑 AUTHORIZE: client_id={client_id[:40]}... redirect_uri={redirect_uri} "
@@ -267,20 +279,17 @@ async def oauth_authorize(
         scope=scope,
     )
 
-    if redirect_uri:
-        from urllib.parse import urlencode
-        from fastapi.responses import RedirectResponse
+    from urllib.parse import urlencode
+    from fastapi.responses import RedirectResponse
 
-        base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
-        params = {"code": auth_code, "iss": base_url}
-        if state:
-            params["state"] = state
-        separator = "&" if "?" in redirect_uri else "?"
-        redirect_url = f"{redirect_uri}{separator}{urlencode(params)}"
-        print(f"↩️  REDIRECT: {redirect_url[:100]}...")
-        return RedirectResponse(url=redirect_url, status_code=302)
-
-    return {"code": auth_code, "state": state, "iss": os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")}
+    base_url = os.getenv("MCP_BASE_URL", "https://mcp.ziksaka.com")
+    params = {"code": auth_code, "iss": base_url}
+    if state:
+        params["state"] = state
+    separator = "&" if "?" in redirect_uri else "?"
+    redirect_url = f"{redirect_uri}{separator}{urlencode(params)}"
+    print(f"↩️  REDIRECT: {redirect_uri[:80]} (code issued)")
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @app.post("/token")
@@ -410,6 +419,30 @@ async def oauth_token(request: Request):
     )
 
 
+@app.post("/revoke")
+async def oauth_revoke(request: Request):
+    """
+    OAuth 2.0 Token Revocation (RFC 7009) for public clients.
+    Revokes an access or refresh token if it belongs to the given client_id.
+    Answers 200 whether or not the token existed, so callers learn nothing.
+    """
+    from urllib.parse import unquote
+
+    form_data = await request.form()
+    token = form_data.get("token")
+    client_id = form_data.get("client_id")
+    if not token or not client_id:
+        return JSONResponse(
+            content={"error": "invalid_request", "error_description": "token and client_id are required"},
+            status_code=400,
+        )
+
+    revoked = await token_store.revoke_token(str(token), unquote(str(client_id)))
+    if revoked:
+        print(f"🚫 REVOKE: client_id={str(client_id)[:40]}...")
+    return Response(status_code=200)
+
+
 @app.get("/")
 async def root():
     return {
@@ -420,6 +453,7 @@ async def root():
             "health": "/health",
             "oauth_authorize": "/authorize",
             "oauth_token": "/token",
+            "oauth_revoke": "/revoke",
             "oauth_discovery": "/.well-known/oauth-authorization-server",
             "resource_metadata": "/.well-known/oauth-protected-resource",
         },

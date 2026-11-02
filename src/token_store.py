@@ -5,6 +5,10 @@ Tables:
   auth_codes    -- short-lived auth codes (TTL: 10 min)
   access_tokens -- short-lived access tokens (TTL: 1 hour)
   refresh_tokens -- long-lived refresh tokens (TTL: 30 days)
+
+Codes and tokens are stored as SHA-256 hashes; the raw values exist only in the
+HTTP responses to the client. A one-time migration hashes rows written by older
+versions, so existing sessions survive the upgrade.
 """
 import asyncio
 import base64
@@ -13,6 +17,18 @@ import secrets
 import sqlite3
 import time
 from typing import Optional
+
+
+def hash_token(value: str) -> str:
+    """Storage form of a code or token (SHA-256 hex)."""
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+_HASHED_COLUMNS = (
+    ("auth_codes", "code"),
+    ("access_tokens", "token"),
+    ("refresh_tokens", "token"),
+)
 
 
 class TokenStore:
@@ -68,8 +84,41 @@ class TokenStore:
                     conn.execute("ALTER TABLE auth_codes ADD COLUMN redirect_uri TEXT")
 
                 conn.commit()
+                self._hash_legacy_rows(conn)
             finally:
                 conn.close()
+
+    @staticmethod
+    def _hash_legacy_rows(conn: sqlite3.Connection) -> None:
+        """Hash raw codes/tokens left by older versions, exactly once.
+
+        BEGIN IMMEDIATE takes the write lock before the flag is read, so when
+        several uvicorn workers start together only the first one migrates.
+        """
+        conn.isolation_level = None  # explicit transaction control
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            done = conn.execute(
+                "SELECT value FROM meta WHERE key = 'tokens_hashed'"
+            ).fetchone()
+            if done is None:
+                for table, column in _HASHED_COLUMNS:
+                    raw_values = [
+                        row[0] for row in conn.execute(f"SELECT {column} FROM {table}")
+                    ]
+                    for raw in raw_values:
+                        conn.execute(
+                            f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                            (hash_token(raw), raw),
+                        )
+                conn.execute("INSERT INTO meta (key, value) VALUES ('tokens_hashed', '1')")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     # -------------------------------------------------------------------------
     # OAuth clients (Dynamic Client Registration - RFC 7591)
@@ -157,7 +206,7 @@ class TokenStore:
             try:
                 conn.execute(
                     "INSERT OR REPLACE INTO auth_codes (code, client_id, redirect_uri, code_challenge, scope, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (code, client_id, redirect_uri, code_challenge, scope, expires_at),
+                    (hash_token(code), client_id, redirect_uri, code_challenge, scope, expires_at),
                 )
                 conn.commit()
             finally:
@@ -170,7 +219,7 @@ class TokenStore:
             try:
                 row = conn.execute(
                     "SELECT * FROM auth_codes WHERE code = ? AND expires_at > ?",
-                    (code, int(time.time())),
+                    (hash_token(code), int(time.time())),
                 ).fetchone()
                 return dict(row) if row else None
             finally:
@@ -181,7 +230,7 @@ class TokenStore:
         async with self._lock:
             conn = self._get_conn()
             try:
-                conn.execute("DELETE FROM auth_codes WHERE code = ?", (code,))
+                conn.execute("DELETE FROM auth_codes WHERE code = ?", (hash_token(code),))
                 conn.commit()
             finally:
                 conn.close()
@@ -205,11 +254,11 @@ class TokenStore:
             try:
                 conn.execute(
                     "INSERT OR REPLACE INTO access_tokens (token, client_id, scope, expires_at) VALUES (?, ?, ?, ?)",
-                    (access_token, client_id, scope, access_expires),
+                    (hash_token(access_token), client_id, scope, access_expires),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO refresh_tokens (token, client_id, scope, expires_at) VALUES (?, ?, ?, ?)",
-                    (refresh_token, client_id, scope, refresh_expires),
+                    (hash_token(refresh_token), client_id, scope, refresh_expires),
                 )
                 conn.commit()
             finally:
@@ -222,7 +271,7 @@ class TokenStore:
             try:
                 row = conn.execute(
                     "SELECT * FROM access_tokens WHERE token = ? AND expires_at > ?",
-                    (token, int(time.time())),
+                    (hash_token(token), int(time.time())),
                 ).fetchone()
                 return dict(row) if row else None
             finally:
@@ -235,7 +284,7 @@ class TokenStore:
             try:
                 row = conn.execute(
                     "SELECT * FROM refresh_tokens WHERE token = ? AND expires_at > ?",
-                    (token, int(time.time())),
+                    (hash_token(token), int(time.time())),
                 ).fetchone()
                 return dict(row) if row else None
             finally:
@@ -264,16 +313,17 @@ class TokenStore:
             try:
                 # Revoke old refresh token
                 conn.execute(
-                    "DELETE FROM refresh_tokens WHERE token = ?", (old_refresh_token,)
+                    "DELETE FROM refresh_tokens WHERE token = ?",
+                    (hash_token(old_refresh_token),),
                 )
                 now = int(time.time())
                 conn.execute(
                     "INSERT OR REPLACE INTO access_tokens (token, client_id, scope, expires_at) VALUES (?, ?, ?, ?)",
-                    (new_access, client_id, scope, now + 3600),
+                    (hash_token(new_access), client_id, scope, now + 3600),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO refresh_tokens (token, client_id, scope, expires_at) VALUES (?, ?, ?, ?)",
-                    (new_refresh, client_id, scope, now + 30 * 86400),
+                    (hash_token(new_refresh), client_id, scope, now + 30 * 86400),
                 )
                 conn.commit()
             finally:
@@ -285,8 +335,31 @@ class TokenStore:
         async with self._lock:
             conn = self._get_conn()
             try:
-                conn.execute("DELETE FROM access_tokens WHERE token = ?", (token,))
+                conn.execute(
+                    "DELETE FROM access_tokens WHERE token = ?", (hash_token(token),)
+                )
                 conn.commit()
+            finally:
+                conn.close()
+
+    async def revoke_token(self, token: str, client_id: str) -> bool:
+        """RFC 7009 revocation: delete the token if it belongs to client_id.
+
+        Checks both tables, so token_type_hint is not needed. Returns whether
+        anything was deleted (the endpoint answers 200 either way).
+        """
+        hashed = hash_token(token)
+        async with self._lock:
+            conn = self._get_conn()
+            try:
+                deleted = 0
+                for table in ("access_tokens", "refresh_tokens"):
+                    deleted += conn.execute(
+                        f"DELETE FROM {table} WHERE token = ? AND client_id = ?",
+                        (hashed, client_id),
+                    ).rowcount
+                conn.commit()
+                return deleted > 0
             finally:
                 conn.close()
 
