@@ -122,8 +122,9 @@ async def verify_api_key(
         if len(parts) == 2 and parts[0].lower() == "bearer":
             token = parts[1]
 
+    # Headers only: an ?api_key= query string would land in proxy access logs.
     if not token:
-        token = request.query_params.get("api_key") or request.headers.get("X-API-Key")
+        token = request.headers.get("X-API-Key")
 
     if not token:
         print(
@@ -132,7 +133,7 @@ async def verify_api_key(
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header or api_key parameter",
+            detail="Missing Authorization or X-API-Key header",
         )
 
     print(f"🔐 AUTH request UA={request.headers.get('user-agent', '?')}")
