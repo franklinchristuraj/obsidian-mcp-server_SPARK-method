@@ -1684,7 +1684,8 @@ Note: Meeting notes intelligently parse freeform content and only include sectio
             _tool(
                 "create_engagement",
                 (
-                    "Create a VE engagement note in work/12_engagements/. Routes by "
+                    "Create a VE/FDE engagement note in work/12_engagements/ (FDE MakeOS "
+                    "deliveries use engagement_type=delivery). Routes by "
                     "engagement_type to the correct vault template "
                     "(build-with-me-engagement, technical-deep-dive, ve-assist, or "
                     "generic ve-engagement). Use for parent Build-with-Me adoption "

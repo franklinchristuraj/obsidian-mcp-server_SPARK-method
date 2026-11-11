@@ -109,6 +109,24 @@ class ObsidianPrompts:
                     }
                 ],
             ),
+            # Prompt 7: FDE (France MakeOS hub) operating loop
+            MCPPrompt(
+                name="fde_workflow",
+                description=(
+                    "FDE role (France MakeOS hub) operating loop: orient on the hub, MakeOS "
+                    "questions, customer calls, deliveries, Friday evidence log. scope=work."
+                ),
+                arguments=[
+                    {
+                        "name": "customer",
+                        "description": (
+                            "Optional: MakeOS customer or prospect name, used to make the "
+                            "example calls concrete."
+                        ),
+                        "required": False,
+                    }
+                ],
+            ),
         ]
 
     async def get_prompt_content(
@@ -132,6 +150,8 @@ class ObsidianPrompts:
             return self._get_format_preservation_rules()
         elif prompt_name == "meeting_prep_workflow":
             return self._get_meeting_prep_workflow(arguments.get("entity_name"))
+        elif prompt_name == "fde_workflow":
+            return self._get_fde_workflow(arguments.get("customer"))
         else:
             raise ValueError(f"Unknown prompt: {prompt_name}")
 
@@ -147,11 +167,17 @@ The vault is split into top-level folders (scopes):
 |-------|-------------|--------------|
 | `personal` | Journal, family, finances, health, trips, people | Never |
 | `passion` | Research, side projects, learning, blueprints. Raw material stays here. | Show vault |
-| `work` | Employer projects, meetings, stakeholders, OKRs, **entity graph** | Work only |
+| `work` | Make (Celonis) role: **FDE, France MakeOS hub** (from 2026-11-09; VE history kept). Meetings, stakeholders, MakeOS, OKRs, **entity graph** | Work only |
 | `parallax` | Frontier product build: charter, decisions, discovery, conversations, opaque `entities/org/` | Safe by construction, no third-party material ever enters |
 | `spectrum` | Content engine. Insights, frameworks, and one note per piece (Loop Interrupted, YouTube, Instagram, LinkedIn). Link raw notes; do not copy them. | Published pieces are showable; `li-*` show docs stay internal |
 
 Each scope has its own `00_system/templates/` and layout. Same relative path in two scopes is **two different notes**. Parallax deliberately omits `02_projects/`, `03_areas/`, `04_resources/`, `05_knowledge/`, `raw/`, and `entities/person/`. Spectrum is a production pipeline, not SPARK: `01_insights/`, `02_frameworks/`, `03_channels/`, `04_pieces/<channel>/`, `05_strategy/`. Client examples pulled from `work/` are anonymised (industry and situation, never company names).
+
+**Whose vault / current role:** Franklin Christuraj, **Forward-Deployed Engineer (FDE), France MakeOS hub** at Make (Celonis) since 2026-11-09 (previously Value Engineer). He acts as VE until the first MakeOS France customer closes. The FDE "comes, implements, leaves" with production use cases, not pilots.
+
+**FDE is a hub inside `work/`, not a workspace.** Workspaces separate trust boundaries, not topics, and FDE shares the work boundary. Use `scope=work` for everything FDE. Never create an `fde/` scope or a sixth workspace. See §4 *FDE hub*.
+
+**Spectrum rules:** raw material stays in its source scope and is linked from spectrum (`source:`), never copied. Tags come only from `00_system/topic-catalog.md`. Podcast partnership business terms never enter spectrum. `create_note` templates: `01_insights/` → insight, `02_frameworks/` → framework, `04_pieces/loop-interrupted/` → episode, `04_pieces/youtube/` → video, `04_pieces/instagram/` → social-post, `04_pieces/linkedin/` → linkedin-post.
 
 ## 2. Start with `workspaces`
 
@@ -162,18 +188,19 @@ Call the **`workspaces`** tool once per session (or when unsure). It returns **`
 ## 3. Paths and `scope`
 
 - **`path`** arguments are **relative to a workspace**, e.g. `06_daily-notes/2026-04-11.md`, `entities/customer/gojob.md`, `entities/org/o-014.md`.
-- **Work meeting notes** use **`scope=work`** and paths under **`11_work-meeting-notes/`** (aligned with meeting templates in `template_utils`).
+- **Work meeting notes** use **`scope=work`** and paths under **`11_meeting-notes/`** (canonical). `11_work-meeting-notes` is a legacy alias for template selection only; never create that folder.
 - **Never** put `personal/`, `passion/`, `work/`, `parallax/`, or `spectrum/` as the first segment of `path`. Use the **`scope`** parameter instead.
 - **Reads** (search, list, vault intelligence, read): optional `scope`. Omit to include all **read** scopes for this key; set it to narrow to one workspace.
 - **Writes** (`create_note`, `update_note`, `append_note`, `delete_note`, `promote_capture`): gated by **`write_scopes`**. If the key has more than one write scope, **`scope` is required**. Single-write-scope keys auto-select.
-- **Work-only tools** (`create_event`, `create_engagement`, `capture_snapshot`, `engagement_delta`, `impact_rollup`, `prep_card`, snapshot/debrief apps) **reject** every non-work scope, including `parallax` and `spectrum` — they never silently write into `work/`.
+- **Work-only tools** (`create_event`, `create_engagement`, `capture_snapshot`, `engagement_delta`, `impact_rollup`, `prep_card`, snapshot/debrief apps) **reject** every non-work scope, including `parallax` and `spectrum` — they never silently write into `work/`. They apply to FDE deliveries as well as VE engagements.
 
 ## 4. Work vault entity graph (read the structure, do not infer it)
 
 The **work** scope includes a hand-maintained knowledge graph under `entities/`:
 
 - **Entity cards** live at `entities/{entity_type}/{kebab-name}.md` (e.g. `entities/customer/gojob.md`).
-- **`entity_type`** is one of: `person`, `internal-stakeholder`, `customer`, `partner`, `company`, `org`, `concept`, `tool`, `industry`, `use-case`, `event`. (`org` = parallax opaque company codes under `entities/org/`.)
+- **`entity_type`** is one of: `person`, `internal-stakeholder`, `customer`, `partner`, `company`, `org`, `concept`, `framework`, `tool`, `industry`, `use-case`, `pain-point`, `event`. (`org` = parallax opaque company codes under `entities/org/`.)
+- **Pain points** are per-instance: one card per customer per pain at `entities/pain-point/{customer-slug}-{short-pain-slug}.md`. `credibility` starts at `single-source` and is never hand-upgraded (aggregation in `04_resources/pain-point-map.md` derives it).
 - Most cards have YAML frontmatter: `type`, `created`, `agent_context`, `tags`, `entity_type`, plus optional `aliases`, `poc_stage`, `lifecycle_stage`, etc.
 - **`## Connections`** lists related notes as `[[wikilinks]]` (paths workspace-relative, no `work/` prefix).
 - **`## Source History`** holds dated mention lines with wikilinks.
@@ -213,7 +240,36 @@ Event entities use **bare** links (`[[claroty]]`, `[[2026-05-01-claroty-discover
 
 ### Work folder map (MCP paths under `scope=work`)
 
-Key paths: `entities/{entity_type}/` (knowledge graph, including `entities/event/`), `11_work-meeting-notes/` (alias `11_meeting-notes`), `12_engagements/`, `13_feedback/`, `raw/` (read only), `index.md`, `log.md`. Passion-only: `07_blueprints/` (`proj-*` / `tool-*` prefixes). Root capture inbox: vault-root `01_seeds/` via **`capture`** (no scope).
+Key paths: `entities/{entity_type}/` (knowledge graph, including `entities/event/`), `11_meeting-notes/` (canonical; `11_work-meeting-notes` is a legacy alias), `12_engagements/`, `13_feedback/`, `03_areas/fde/` (FDE hub), `03_areas/makeos/` (MakeOS product knowledge), `04_resources/fde/`, `06_playbooks/`, `raw/` (read only), `index.md`, `log.md`. Passion-only: `07_blueprints/` (`proj-*` / `tool-*` prefixes). Root capture inbox: vault-root `01_seeds/` via **`capture`** (no scope).
+
+### FDE hub (`scope=work`) — the core role
+
+Start at **`03_areas/fde/_index.md`** (hub with the "Where things go" table). It is a thin lens over existing work infrastructure: people, customers, signals and deliveries reuse `entities/`, `03_areas/makeos/` and `12_engagements/`. For a step-by-step loop, load the **`fde_workflow`** prompt.
+
+| Content | Destination (under `scope=work`) |
+|---------|-----------------------------------|
+| The plan (goals, phases, exit tests), runs to 2027-01-31 | `02_projects/2026-11_fde-first-90-days.md` |
+| Open questions about role / mandate (facets A–G) | `02_projects/2026-11-fde-transition.md` until it closes 2026-11-30, then hub *Open items* |
+| What shipped / changed / was learned this week (Friday) | `03_areas/fde/fde-evidence-log.md` — **the performance record** |
+| Skill levels (spider-map backend) | `03_areas/fde/fde-skill-map.md` (frontmatter `skills:`) |
+| FDE course, article or talk notes | `04_resources/fde/course-<name>.md`, ending with `## Promote?` |
+| How other regions run SA / FDE | `04_resources/fde/fde-regional-benchmark.md` |
+| MakeOS product knowledge, limits, releases, positioning | `03_areas/makeos/` (read `_index.md` first) |
+| A customer signal about MakeOS | `03_areas/makeos/makeos-field-signals.md` |
+| SME mandate (~20% time box) | `03_areas/makeos/makeos-sme-mandate.md` |
+| A repeatable FDE method, after it has been done once for real | `06_playbooks/fde-playbook.md` |
+| A MakeOS customer or prospect | `entities/customer/` with `lifecycle_stage` + `commercial_status: prospect`, tag `makeos` |
+| A call or session with a customer | `create_event`; a real delivery also gets an engagement |
+| A multi-month MakeOS delivery | `create_engagement(engagement_type="delivery")` — no new ontology value |
+| Reorg fact base (two motions, MakeOS milestones) | `04_resources/2026-11-04_make-reorg-two-motions.md` |
+| A transferable FDE insight worth publishing | Promote to `passion/` (or spectrum) with company detail stripped — never copy |
+
+**FDE rules for agents:**
+1. Success measures **M1–M6 are hypotheses** until the manager signs them (target 2026-12-06). Never present them as agreed. The plan's frontmatter `measures:` is the source of truth; update it before the body table.
+2. **Agreement before instruments.** Don't propose new trackers or dashboards; the weekly evidence log is the instrument.
+3. The **FDE OS UI is gated to 2026-12-06** (`02_projects/fde-os-ui.md`). Every panel reads through `03_areas/fde/fde-os-data-contract.md`; when a source note or field it reads changes, update the contract in the same pass.
+4. Company milestones to anchor on: **40 MakeOS discovery calls in November, 5 paid commitments by end of January.** MakeOS is not customer-ready until about early January.
+5. The role is reviewed at the end of January 2027; build the review dossier from the evidence log.
 
 ## 5. Which tool when
 
@@ -288,6 +344,18 @@ Use only registered tool names (legacy `obs_*` names are not available).
 **Logging a new interaction** (call, build session, demo…):
 1. `create_event(event_type="discovery-call", customer="GoJob", participants=["Julien"], event_date="2026-06-01", scope="work")` — handles filename, frontmatter, and `## Events` back-refs. Prefer this over hand-building an event card with `create_note`.
 
+**FDE orient** (any FDE / MakeOS question):
+1. `read_note(path="03_areas/fde/_index.md", scope="work")`, then `02_projects/2026-11_fde-first-90-days.md` for goals and measures.
+2. MakeOS product question: `read_note(path="03_areas/makeos/_index.md", scope="work")` first.
+
+**Friday evidence entry** (FDE performance record):
+1. `append_note(path="03_areas/fde/fde-evidence-log.md", scope="work", content="...")` — what shipped, changed, was learned this week.
+
+**MakeOS pipeline**:
+1. `query_frontmatter(filters={entity_type: customer}, scope="work", folder="entities/customer")`, keep entries tagged `makeos` (`lifecycle_stage`, `commercial_status`).
+
+For the full FDE loop (orient → call → delivery → evidence), load the **`fde_workflow`** prompt.
+
 **Full meeting cycle** (brief → take the call → log it): load the **`meeting_prep_workflow`** prompt — it chains `get_dossier`/`build_context` before the call with `create_event` after, in one documented flow.
 
 **Renaming/moving an entity or note**:
@@ -324,6 +392,8 @@ Vault-side companion docs: **`AGENTS.md`** (MCP tool catalog), **`CLAUDE.md`** (
 After this guide, use **`note_template_system`** and the type-specific prompts for YAML and section structure. Template paths on disk include the workspace (e.g. `personal/00_system/templates/...`); MCP **`create_note`** resolves templates using the **`scope`** you pass.
 
 For a whole work meeting (brief before, log after), load **`meeting_prep_workflow`** instead — it walks `get_dossier`/`build_context` and `create_event` as one flow rather than one-line tool mentions.
+
+For FDE work (France MakeOS hub), load **`fde_workflow`** — the hub, plan, evidence log, MakeOS knowledge and delivery tools as one loop.
 
 ---
 *Maintain this prompt when tools or scope rules change; keep it the single agent-facing summary.*
@@ -847,6 +917,102 @@ This makes the meeting a first-class graph node: `resolve_entity`,
 
 For tool argument details and the entity graph model, see
 **`vault_mcp_agent_guide`** (load once per session).
+"""
+
+    def _get_fde_workflow(self, customer: Optional[str] = None) -> str:
+        """FDE (France MakeOS hub) loop over existing work-scope tools.
+
+        Mirrors the vault's CLAUDE.md "FDE Routing" and work/03_areas/fde/_index.md;
+        keep in sync when the hub's "Where things go" table changes.
+        """
+        name = customer or "<customer>"
+        return f"""# FDE Workflow — France MakeOS hub (scope=work)
+
+Franklin has been a **Forward-Deployed Engineer (FDE), France MakeOS hub**
+since 2026-11-09, acting as VE until the first MakeOS France customer closes.
+The FDE "comes, implements, leaves" with production use cases, not pilots.
+
+**FDE is not a workspace.** Everything below is `scope="work"`. Never create
+an `fde/` scope or folder outside `work/`.
+
+## 1. Orient
+
+```
+read_note(path="03_areas/fde/_index.md", scope="work")                    # hub + "Where things go"
+read_note(path="02_projects/2026-11_fde-first-90-days.md", scope="work")  # plan, phases, measures
+```
+
+The plan's frontmatter `measures:` (M1–M6) are **hypotheses until signed**
+(target 2026-12-06). Never report them as agreed.
+
+## 2. MakeOS questions
+
+Read `03_areas/makeos/_index.md` first (product brief, limits, release
+timeline, positioning). A customer signal about MakeOS goes to
+`03_areas/makeos/makeos-field-signals.md` via `append_note`.
+
+Pipeline view:
+
+```
+query_frontmatter(filters={{"entity_type": "customer"}}, scope="work", folder="entities/customer")
+```
+
+Keep entries tagged `makeos`; read `lifecycle_stage` and `commercial_status`.
+A new prospect is an `entities/customer/` card with
+`commercial_status: prospect` and tag `makeos`.
+
+## 3. Customer call
+
+Before: `get_dossier(name="{name}", scope="work")` (add `since=` for changes
+only). After: log it as a graph node.
+
+```
+create_event(event_type="discovery-call", customer="{name}", participants=[...],
+             agent_context="<one line>", scope="work")
+```
+
+Stated pains become `entities/pain-point/{{customer}}-{{pain}}.md` cards
+(`credibility: single-source`, never hand-upgraded).
+
+## 4. Delivery
+
+A real multi-month MakeOS delivery is an engagement — no new ontology value:
+
+```
+create_engagement(engagement_type="delivery", customer="{name}", scope="work")
+```
+
+Capture adoption metrics with `capture_snapshot` so `engagement_delta` /
+`impact_rollup` can show impact later. Each session is a `create_event` with
+`parent_engagement` set.
+
+## 5. Friday evidence (5 min) — the performance record
+
+```
+append_note(path="03_areas/fde/fde-evidence-log.md", scope="work",
+            content="## <YYYY-MM-DD>\\n- Shipped: ...\\n- Changed: ...\\n- Learned: ...")
+```
+
+The end-of-January 2027 role review is built from this log.
+
+## 6. Learning and playbook
+
+- Course / article / talk notes: `create_note(path="04_resources/fde/course-<name>.md", scope="work")`, ending with `## Promote?`.
+- Regional SA / FDE comparisons: `04_resources/fde/fde-regional-benchmark.md`.
+- Skill levels: `03_areas/fde/fde-skill-map.md` (frontmatter `skills:`).
+- A repeatable method goes in `06_playbooks/fde-playbook.md` **only after it has been done once for real**.
+- A transferable insight worth publishing is promoted to `passion/` (or spectrum, anonymised) — never copied.
+
+## Rules
+
+1. M1–M6 are hypotheses until signed; update the plan's frontmatter `measures:` before its body table.
+2. Agreement before instruments: don't propose new trackers or dashboards.
+3. The FDE OS UI is gated to 2026-12-06 (`02_projects/fde-os-ui.md`). When a field the FDE OS reads changes, update `03_areas/fde/fde-os-data-contract.md` in the same pass.
+4. Company milestones: 40 MakeOS discovery calls in November, 5 paid commitments by end of January. MakeOS is not customer-ready until about early January.
+5. Role questions (mandate, facets A–G) go to `02_projects/2026-11-fde-transition.md` until 2026-11-30, then the hub's *Open items*.
+
+For tool argument details see **`vault_mcp_agent_guide`**; for the
+brief-then-log meeting loop see **`meeting_prep_workflow`**.
 """
 
 

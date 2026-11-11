@@ -28,6 +28,7 @@ REQUIRED_ENTITY_FM_BY_TYPE: Dict[str, frozenset] = {
 }
 # Documented entity_type values across work + parallax. `org` is the parallax
 # opaque-company card (entities/org/); work still uses customer/company/partner.
+# `framework` and `pain-point` follow work/CLAUDE.md's entity table.
 ENTITY_TYPES = frozenset(
     {
         "person",
@@ -37,9 +38,11 @@ ENTITY_TYPES = frozenset(
         "company",
         "org",
         "concept",
+        "framework",
         "tool",
         "industry",
         "use-case",
+        "pain-point",
         "event",
     }
 )

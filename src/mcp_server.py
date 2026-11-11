@@ -82,6 +82,10 @@ _PROMPTS_GET_DESCRIPTIONS: Dict[str, str] = {
         "Step-by-step workflow for prepping a meeting from an entity_name: pulls dossier, "
         "recent engagement, and open threads via the graph tools before the call."
     ),
+    "fde_workflow": (
+        "FDE role (France MakeOS hub) operating loop: orient on the hub, MakeOS "
+        "questions, customer calls, deliveries, Friday evidence log. scope=work."
+    ),
 }
 
 
@@ -125,7 +129,8 @@ class MCPProtocolHandler:
                 f"({SCOPE_NAMES.replace('/', ' / ')}), vault intelligence, capture inbox, "
                 "create_event/create_engagement (work-only), impact snapshots, "
                 "and MCP Apps (prep_card, lint_queue, snapshot_grid, debrief_form, triage_board, "
-                "promote_capture). Load MCP prompt vault_mcp_agent_guide first."
+                "promote_capture). Load MCP prompt vault_mcp_agent_guide first; "
+                "fde_workflow for the FDE (France MakeOS hub) role in scope=work."
             ),
         }
         self.instructions = (
@@ -134,7 +139,11 @@ class MCPProtocolHandler:
             f"({SCOPE_NAMES}), write_scopes, the entity graph tools "
             "(resolve_entity, get_dossier, build_context, graph/timeline tools), and "
             "path/scope conventions. Call 'workspaces' first to see which scopes this "
-            "API key can read and write."
+            "API key can read and write. Franklin's work role is FDE (France MakeOS "
+            "hub, from 2026-11-09): FDE content is scope=work under 03_areas/fde/ "
+            "(a hub inside work, not a separate workspace); load prompt "
+            "'fde_workflow' for FDE tasks. Spectrum is the content engine "
+            "(scope=spectrum); raw notes stay in their source scope and are linked."
         )
         self.capabilities = MCPCapabilities(
             tools={"listChanged": False},
